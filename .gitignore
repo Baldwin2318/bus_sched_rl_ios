@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+
+# Xcode user data
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+
+# Build products
+build/
+DerivedData/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Xcode logs and results
+*.xcresult
+*.xcactivitylog
+
+# Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# Xcode preview app container dumps
+*.xcappdata
+**/*.xcappdata/
+**/*.xcappdata/**
+**/AppDataInfo.plist
