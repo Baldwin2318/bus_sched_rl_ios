@@ -28,3 +28,6 @@ playground.xcworkspace
 **/*.xcappdata/
 **/*.xcappdata/**
 **/AppDataInfo.plist
+
+# Local agent instructions
+AGENT.md
