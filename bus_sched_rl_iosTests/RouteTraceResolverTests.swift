@@ -3,10 +3,11 @@ import CoreLocation
 @testable import bus_sched_rl_ios
 
 final class RouteTraceResolverTests: XCTestCase {
-    func testResolverFallsBackToSTMSigShapeWhenDirectionMissing() {
+    func testResolverUsesShapeIDFallbackWhenPrimaryRouteShapeIsMissing() {
         let resolver = RouteTraceResolver()
         let bus = VehiclePosition(
             id: "1",
+            tripID: nil,
             route: "165",
             direction: 9,
             heading: 0,
@@ -21,11 +22,11 @@ final class RouteTraceResolverTests: XCTestCase {
         let result = resolver.resolveTrace(
             bus: bus,
             routeShapes: [:],
-            shapeCoordinatesByID: ["S1": shape],
-            stmSigMap: ["165": [STMSIGRouteShapeRef(headsign: "Nord", shape_id: "S1")]]
+            routeShapeIDsByKey: [RouteKey(route: "165", direction: "9"): ["S1"]],
+            shapeCoordinatesByID: ["S1": shape]
         )
 
-        XCTAssertFalse(result.isEmpty)
-        XCTAssertEqual(result.last?.latitude, 45.51, accuracy: 0.0001)
+        XCTAssertFalse(result.trace.isEmpty)
+        XCTAssertEqual(result.trace.last?.latitude, 45.51, accuracy: 0.0001)
     }
 }

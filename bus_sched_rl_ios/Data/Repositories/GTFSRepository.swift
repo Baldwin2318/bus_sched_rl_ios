@@ -5,9 +5,11 @@ import ZIPFoundation
 struct GTFSStaticData {
     let routeShapes: [String: [String: [CLLocationCoordinate2D]]]
     let routeStops: [RouteKey: [BusStop]]
+    let routeStopSchedules: [RouteKey: [RouteStopSchedule]]
     let shapeCoordinatesByID: [String: [CLLocationCoordinate2D]]
     let routeShapeIDsByKey: [RouteKey: [String]]
     let routeDirectionLabels: [RouteKey: String]
+    let feedInfo: GTFSFeedInfo?
 
     var availableRoutes: [String] {
         routeShapes.keys.sorted()
@@ -16,6 +18,8 @@ struct GTFSStaticData {
 
 protocol GTFSRepository {
     func loadStaticData() async throws -> GTFSStaticData
+    func refreshStaticData(force: Bool) async throws -> GTFSStaticData
+    func cacheMetadata() async -> GTFSCacheMetadata
 }
 
 private struct TripsParseResult {
@@ -173,14 +177,20 @@ private enum GTFSParsers {
         return stopsByID
     }
 
-    static func parseRouteStops(
+    private static func normalizedOptional(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = normalize(value)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    static func parseRouteStopSchedules(
         stopTimesText: String,
         representativeTripByRoute: [RouteKey: String],
         routeByTripID: [String: RouteKey],
         stopsByID: [String: BusStop]
-    ) -> [RouteKey: [BusStop]] {
+    ) -> [RouteKey: [RouteStopSchedule]] {
         let selectedTripIDs = Set(representativeTripByRoute.values)
-        var routeStopRows: [RouteKey: [(sequence: Int, stop: BusStop)]] = [:]
+        var routeStopRows: [RouteKey: [(sequence: Int, stop: BusStop, arrival: String?, departure: String?)]] = [:]
 
         var isHeader = true
         var header: [String: Int] = [:]
@@ -203,21 +213,99 @@ private enum GTFSParsers {
                   let stop = stopsByID[normalize(cols[stopIdx])],
                   let seq = Int(cols[seqIdx]) else { return }
 
-            routeStopRows[routeKey, default: []].append((seq, stop))
+            let arrival: String?
+            if let arrivalIdx = header["arrival_time"], arrivalIdx < cols.count {
+                arrival = normalizedOptional(cols[arrivalIdx])
+            } else {
+                arrival = nil
+            }
+
+            let departure: String?
+            if let departureIdx = header["departure_time"], departureIdx < cols.count {
+                departure = normalizedOptional(cols[departureIdx])
+            } else {
+                departure = nil
+            }
+
+            routeStopRows[routeKey, default: []].append((seq, stop, arrival, departure))
         }
 
-        var routeStops: [RouteKey: [BusStop]] = [:]
+        var routeStops: [RouteKey: [RouteStopSchedule]] = [:]
         for (routeKey, rows) in routeStopRows {
             let ordered = rows.sorted { $0.sequence < $1.sequence }
             var seen: Set<String> = []
             routeStops[routeKey] = ordered.compactMap { row in
                 if seen.contains(row.stop.id) { return nil }
                 seen.insert(row.stop.id)
-                return row.stop
+                return RouteStopSchedule(
+                    stop: row.stop,
+                    sequence: row.sequence,
+                    scheduledArrival: row.arrival,
+                    scheduledDeparture: row.departure
+                )
             }
         }
 
         return routeStops
+    }
+
+    static func parseFeedInfo(_ text: String) -> GTFSFeedInfo? {
+        var isHeader = true
+        var header: [String: Int] = [:]
+        var parsed: GTFSFeedInfo?
+
+        text.enumerateLines { line, stop in
+            if parsed != nil {
+                stop = true
+                return
+            }
+            if isHeader {
+                isHeader = false
+                header = headerIndexMap(line)
+                return
+            }
+            guard !line.isEmpty, let cols = try? CSVParser.parseLine(line) else { return }
+
+            let feedVersion: String?
+            if let versionIdx = header["feed_version"], versionIdx < cols.count {
+                feedVersion = normalizedOptional(cols[versionIdx])
+            } else {
+                feedVersion = nil
+            }
+
+            let feedStartDate: Date?
+            if let startIdx = header["feed_start_date"], startIdx < cols.count {
+                feedStartDate = parseFeedDate(cols[startIdx])
+            } else {
+                feedStartDate = nil
+            }
+
+            let feedEndDate: Date?
+            if let endIdx = header["feed_end_date"], endIdx < cols.count {
+                feedEndDate = parseFeedDate(cols[endIdx])
+            } else {
+                feedEndDate = nil
+            }
+
+            parsed = GTFSFeedInfo(
+                feedVersion: feedVersion,
+                feedStartDate: feedStartDate,
+                feedEndDate: feedEndDate
+            )
+            stop = true
+        }
+
+        return parsed
+    }
+
+    private static func parseFeedDate(_ raw: String) -> Date? {
+        let normalized = normalize(raw)
+        guard normalized.count == 8 else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyyMMdd"
+        return formatter.date(from: normalized)
     }
 }
 
@@ -226,6 +314,7 @@ private struct GTFSCacheManifest: Codable {
     let etag: String?
     let lastModified: String?
     let savedAt: Date
+    let feedInfo: GTFSFeedInfo?
 }
 
 private struct CachedCoordinate: Codable {
@@ -248,26 +337,37 @@ private struct CachedRouteShape: Codable {
     let coordinates: [CachedCoordinate]
 }
 
-private struct CachedRouteStop: Codable {
+private struct CachedRouteStopSchedule: Codable {
     let id: String
     let name: String
     let coordinate: CachedCoordinate
+    let sequence: Int
+    let scheduledArrival: String?
+    let scheduledDeparture: String?
 
-    init(_ stop: BusStop) {
-        id = stop.id
-        name = stop.name
-        coordinate = CachedCoordinate(stop.coord)
+    init(_ schedule: RouteStopSchedule) {
+        id = schedule.stop.id
+        name = schedule.stop.name
+        coordinate = CachedCoordinate(schedule.stop.coord)
+        sequence = schedule.sequence
+        scheduledArrival = schedule.scheduledArrival
+        scheduledDeparture = schedule.scheduledDeparture
     }
 
-    var stop: BusStop {
-        BusStop(id: id, name: name, coord: coordinate.coordinate)
+    var schedule: RouteStopSchedule {
+        RouteStopSchedule(
+            stop: BusStop(id: id, name: name, coord: coordinate.coordinate),
+            sequence: sequence,
+            scheduledArrival: scheduledArrival,
+            scheduledDeparture: scheduledDeparture
+        )
     }
 }
 
-private struct CachedRouteStopsEntry: Codable {
+private struct CachedRouteStopSchedulesEntry: Codable {
     let route: String
     let direction: String
-    let stops: [CachedRouteStop]
+    let schedules: [CachedRouteStopSchedule]
 }
 
 private struct CachedShapeCoordinatesEntry: Codable {
@@ -289,10 +389,11 @@ private struct CachedRouteDirectionLabelEntry: Codable {
 
 private struct GTFSStaticCachePayload: Codable {
     let routeShapes: [CachedRouteShape]
-    let routeStops: [CachedRouteStopsEntry]
+    let routeStopSchedules: [CachedRouteStopSchedulesEntry]
     let shapeCoordinates: [CachedShapeCoordinatesEntry]
     let routeShapeIDs: [CachedRouteShapeIDsEntry]
     let routeDirectionLabels: [CachedRouteDirectionLabelEntry]
+    let feedInfo: GTFSFeedInfo?
 
     init(staticData: GTFSStaticData) {
         routeShapes = staticData.routeShapes.flatMap { route, directions in
@@ -305,11 +406,11 @@ private struct GTFSStaticCachePayload: Codable {
             }
         }
 
-        routeStops = staticData.routeStops.map { key, stops in
-            CachedRouteStopsEntry(
+        routeStopSchedules = staticData.routeStopSchedules.map { key, schedules in
+            CachedRouteStopSchedulesEntry(
                 route: key.route,
                 direction: key.direction,
-                stops: stops.map(CachedRouteStop.init)
+                schedules: schedules.map(CachedRouteStopSchedule.init)
             )
         }
 
@@ -327,6 +428,8 @@ private struct GTFSStaticCachePayload: Codable {
         routeDirectionLabels = staticData.routeDirectionLabels.map { key, label in
             CachedRouteDirectionLabelEntry(route: key.route, direction: key.direction, label: label)
         }
+
+        feedInfo = staticData.feedInfo
     }
 
     func toStaticData() -> GTFSStaticData {
@@ -335,10 +438,13 @@ private struct GTFSStaticCachePayload: Codable {
             nextRouteShapes[entry.route, default: [:]][entry.direction] = entry.coordinates.map(\.coordinate)
         }
 
+        var nextRouteStopSchedules: [RouteKey: [RouteStopSchedule]] = [:]
         var nextRouteStops: [RouteKey: [BusStop]] = [:]
-        for entry in routeStops {
+        for entry in routeStopSchedules {
             let key = RouteKey(route: entry.route, direction: entry.direction)
-            nextRouteStops[key] = entry.stops.map(\.stop)
+            let schedules = entry.schedules.map(\.schedule)
+            nextRouteStopSchedules[key] = schedules
+            nextRouteStops[key] = schedules.map(\.stop)
         }
 
         var nextShapeCoordinates: [String: [CLLocationCoordinate2D]] = [:]
@@ -361,9 +467,11 @@ private struct GTFSStaticCachePayload: Codable {
         return GTFSStaticData(
             routeShapes: nextRouteShapes,
             routeStops: nextRouteStops,
+            routeStopSchedules: nextRouteStopSchedules,
             shapeCoordinatesByID: nextShapeCoordinates,
             routeShapeIDsByKey: nextRouteShapeIDs,
-            routeDirectionLabels: nextDirectionLabels
+            routeDirectionLabels: nextDirectionLabels,
+            feedInfo: feedInfo
         )
     }
 }
@@ -374,20 +482,31 @@ actor LiveGTFSRepository: GTFSRepository {
         case downloaded(fileURL: URL, response: HTTPURLResponse)
     }
 
+    private enum DefaultsKey {
+        static let lastUpdatedAt = "gtfs.cache.lastUpdatedAt"
+        static let etag = "gtfs.cache.etag"
+        static let lastModified = "gtfs.cache.lastModified"
+        static let feedVersion = "gtfs.cache.feedVersion"
+        static let feedStartDate = "gtfs.cache.feedStartDate"
+        static let feedEndDate = "gtfs.cache.feedEndDate"
+    }
+
     private let gtfsURL = URL(string: "https://www.stm.info/sites/default/files/gtfs/gtfs_stm.zip")!
     private let extractionDirectory: URL
     private let persistedCacheDirectory: URL
     private let session: URLSession
-    private let cacheSchemaVersion = 1
+    private let userDefaults: UserDefaults
+    private let cacheSchemaVersion = 2
+    private let staleRevalidationInterval: TimeInterval = 24 * 60 * 60
     private var cachedData: GTFSStaticData?
     private var refreshTask: Task<Void, Never>?
 
     private var payloadURL: URL {
-        persistedCacheDirectory.appendingPathComponent("static_data_v1.plist")
+        persistedCacheDirectory.appendingPathComponent("static_data_v2.plist")
     }
 
     private var manifestURL: URL {
-        persistedCacheDirectory.appendingPathComponent("manifest_v1.plist")
+        persistedCacheDirectory.appendingPathComponent("manifest_v2.plist")
     }
 
     init(
@@ -395,11 +514,13 @@ actor LiveGTFSRepository: GTFSRepository {
             .appendingPathComponent("gtfs_temp", isDirectory: true),
         persistedCacheDirectory: URL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("gtfs_cache", isDirectory: true),
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        userDefaults: UserDefaults = .standard
     ) {
         self.extractionDirectory = extractionDirectory
         self.persistedCacheDirectory = persistedCacheDirectory
         self.session = session
+        self.userDefaults = userDefaults
     }
 
     func loadStaticData() async throws -> GTFSStaticData {
@@ -409,35 +530,56 @@ actor LiveGTFSRepository: GTFSRepository {
 
         if let persistedData = loadPersistedStaticDataIfAvailable() {
             cachedData = persistedData
-            scheduleBackgroundRefresh()
+            if shouldScheduleBackgroundRevalidation() {
+                scheduleBackgroundRefresh(forceRefresh: false)
+            }
             return persistedData
         }
 
-        let freshlyLoadedData = try await fetchParsePersistData(existingManifest: nil)
+        let freshlyLoadedData = try await fetchParsePersistData(existingManifest: nil, forceRefresh: false)
         cachedData = freshlyLoadedData
         return freshlyLoadedData
     }
 
-    private func scheduleBackgroundRefresh() {
+    func refreshStaticData(force: Bool) async throws -> GTFSStaticData {
+        refreshTask?.cancel()
+        refreshTask = nil
+
+        let existingManifest = force ? nil : loadPersistedManifestIfAvailable()
+        let refreshed = try await fetchParsePersistData(existingManifest: existingManifest, forceRefresh: force)
+        cachedData = refreshed
+        return refreshed
+    }
+
+    func cacheMetadata() async -> GTFSCacheMetadata {
+        currentMetadata()
+    }
+
+    private func shouldScheduleBackgroundRevalidation() -> Bool {
+        guard let manifest = loadPersistedManifestIfAvailable() else { return true }
+        return Date().timeIntervalSince(manifest.savedAt) >= staleRevalidationInterval
+    }
+
+    private func scheduleBackgroundRefresh(forceRefresh: Bool) {
         guard refreshTask == nil else { return }
         refreshTask = Task(priority: .utility) { [weak self] in
-            await self?.performBackgroundRefresh()
+            await self?.performBackgroundRefresh(forceRefresh: forceRefresh)
         }
     }
 
-    private func performBackgroundRefresh() async {
+    private func performBackgroundRefresh(forceRefresh: Bool) async {
         defer { refreshTask = nil }
         do {
-            let manifest = loadPersistedManifestIfAvailable()
-            let refreshed = try await fetchParsePersistData(existingManifest: manifest)
+            let manifest = forceRefresh ? nil : loadPersistedManifestIfAvailable()
+            let refreshed = try await fetchParsePersistData(existingManifest: manifest, forceRefresh: forceRefresh)
             cachedData = refreshed
         } catch {
             // Keep serving the existing cache if background refresh fails.
         }
     }
 
-    private func fetchParsePersistData(existingManifest: GTFSCacheManifest?) async throws -> GTFSStaticData {
-        let fetchResult = try await fetchGTFSArchive(existingManifest: existingManifest)
+    private func fetchParsePersistData(existingManifest: GTFSCacheManifest?, forceRefresh: Bool) async throws -> GTFSStaticData {
+        let fetchResult = try await fetchGTFSArchive(existingManifest: existingManifest, forceRefresh: forceRefresh)
 
         switch fetchResult {
         case .notModified:
@@ -456,14 +598,16 @@ actor LiveGTFSRepository: GTFSRepository {
         }
     }
 
-    private func fetchGTFSArchive(existingManifest: GTFSCacheManifest?) async throws -> GTFSFetchResult {
+    private func fetchGTFSArchive(existingManifest: GTFSCacheManifest?, forceRefresh: Bool) async throws -> GTFSFetchResult {
         var request = URLRequest(url: gtfsURL)
         request.timeoutInterval = 45
-        if let etag = existingManifest?.etag, !etag.isEmpty {
-            request.setValue(etag, forHTTPHeaderField: "If-None-Match")
-        }
-        if let lastModified = existingManifest?.lastModified, !lastModified.isEmpty {
-            request.setValue(lastModified, forHTTPHeaderField: "If-Modified-Since")
+        if !forceRefresh {
+            if let etag = existingManifest?.etag, !etag.isEmpty {
+                request.setValue(etag, forHTTPHeaderField: "If-None-Match")
+            }
+            if let lastModified = existingManifest?.lastModified, !lastModified.isEmpty {
+                request.setValue(lastModified, forHTTPHeaderField: "If-Modified-Since")
+            }
         }
 
         let (archiveURL, response) = try await session.download(for: request)
@@ -499,6 +643,7 @@ actor LiveGTFSRepository: GTFSRepository {
         let shapesURL = extractionDirectory.appendingPathComponent("shapes.txt")
         let stopsURL = extractionDirectory.appendingPathComponent("stops.txt")
         let stopTimesURL = extractionDirectory.appendingPathComponent("stop_times.txt")
+        let feedInfoURL = extractionDirectory.appendingPathComponent("feed_info.txt")
 
         guard FileManager.default.fileExists(atPath: tripsURL.path),
               FileManager.default.fileExists(atPath: shapesURL.path),
@@ -511,11 +656,19 @@ actor LiveGTFSRepository: GTFSRepository {
             )
         }
 
+        let feedInfoText: String?
+        if FileManager.default.fileExists(atPath: feedInfoURL.path) {
+            feedInfoText = try? String(contentsOf: feedInfoURL, encoding: .utf8)
+        } else {
+            feedInfoText = nil
+        }
+
         return try parseStaticData(
             tripsURL: tripsURL,
             shapesURL: shapesURL,
             stopsURL: stopsURL,
-            stopTimesURL: stopTimesURL
+            stopTimesURL: stopTimesURL,
+            feedInfoText: feedInfoText
         )
     }
 
@@ -533,20 +686,34 @@ actor LiveGTFSRepository: GTFSRepository {
             schemaVersion: cacheSchemaVersion,
             etag: normalizedHeaderValue("ETag", from: response),
             lastModified: normalizedHeaderValue("Last-Modified", from: response),
-            savedAt: Date()
+            savedAt: Date(),
+            feedInfo: staticData.feedInfo
         )
         let manifestData = try encoder.encode(manifest)
         try manifestData.write(to: manifestURL, options: .atomic)
+        persistMetadataToDefaults(manifest)
     }
 
     private func loadPersistedStaticDataIfAvailable() -> GTFSStaticData? {
-        guard loadPersistedManifestIfAvailable() != nil else { return nil }
+        guard let manifest = loadPersistedManifestIfAvailable() else { return nil }
         guard FileManager.default.fileExists(atPath: payloadURL.path) else { return nil }
 
         do {
             let payloadData = try Data(contentsOf: payloadURL)
             let payload = try PropertyListDecoder().decode(GTFSStaticCachePayload.self, from: payloadData)
-            return payload.toStaticData()
+            let data = payload.toStaticData()
+            if data.feedInfo == nil, let feedInfo = manifest.feedInfo {
+                return GTFSStaticData(
+                    routeShapes: data.routeShapes,
+                    routeStops: data.routeStops,
+                    routeStopSchedules: data.routeStopSchedules,
+                    shapeCoordinatesByID: data.shapeCoordinatesByID,
+                    routeShapeIDsByKey: data.routeShapeIDsByKey,
+                    routeDirectionLabels: data.routeDirectionLabels,
+                    feedInfo: feedInfo
+                )
+            }
+            return data
         } catch {
             try? clearPersistedCache()
             return nil
@@ -563,6 +730,7 @@ actor LiveGTFSRepository: GTFSRepository {
                 try? clearPersistedCache()
                 return nil
             }
+            persistMetadataToDefaults(manifest)
             return manifest
         } catch {
             try? clearPersistedCache()
@@ -574,6 +742,80 @@ actor LiveGTFSRepository: GTFSRepository {
         if FileManager.default.fileExists(atPath: persistedCacheDirectory.path) {
             try FileManager.default.removeItem(at: persistedCacheDirectory)
         }
+        clearMetadataInDefaults()
+    }
+
+    private func currentMetadata() -> GTFSCacheMetadata {
+        if let manifest = loadPersistedManifestIfAvailable() {
+            return GTFSCacheMetadata(
+                lastUpdatedAt: manifest.savedAt,
+                etag: manifest.etag,
+                lastModified: manifest.lastModified,
+                feedInfo: manifest.feedInfo
+            )
+        }
+
+        let feedVersion = userDefaults.string(forKey: DefaultsKey.feedVersion)
+        let feedStartDate = userDefaults.object(forKey: DefaultsKey.feedStartDate) as? Date
+        let feedEndDate = userDefaults.object(forKey: DefaultsKey.feedEndDate) as? Date
+        let feedInfo: GTFSFeedInfo?
+        if feedVersion != nil || feedStartDate != nil || feedEndDate != nil {
+            feedInfo = GTFSFeedInfo(feedVersion: feedVersion, feedStartDate: feedStartDate, feedEndDate: feedEndDate)
+        } else {
+            feedInfo = nil
+        }
+
+        return GTFSCacheMetadata(
+            lastUpdatedAt: userDefaults.object(forKey: DefaultsKey.lastUpdatedAt) as? Date,
+            etag: userDefaults.string(forKey: DefaultsKey.etag),
+            lastModified: userDefaults.string(forKey: DefaultsKey.lastModified),
+            feedInfo: feedInfo
+        )
+    }
+
+    private func persistMetadataToDefaults(_ manifest: GTFSCacheManifest) {
+        userDefaults.set(manifest.savedAt, forKey: DefaultsKey.lastUpdatedAt)
+        if let etag = manifest.etag {
+            userDefaults.set(etag, forKey: DefaultsKey.etag)
+        } else {
+            userDefaults.removeObject(forKey: DefaultsKey.etag)
+        }
+        if let lastModified = manifest.lastModified {
+            userDefaults.set(lastModified, forKey: DefaultsKey.lastModified)
+        } else {
+            userDefaults.removeObject(forKey: DefaultsKey.lastModified)
+        }
+
+        if let feedInfo = manifest.feedInfo {
+            if let feedVersion = feedInfo.feedVersion {
+                userDefaults.set(feedVersion, forKey: DefaultsKey.feedVersion)
+            } else {
+                userDefaults.removeObject(forKey: DefaultsKey.feedVersion)
+            }
+            if let start = feedInfo.feedStartDate {
+                userDefaults.set(start, forKey: DefaultsKey.feedStartDate)
+            } else {
+                userDefaults.removeObject(forKey: DefaultsKey.feedStartDate)
+            }
+            if let end = feedInfo.feedEndDate {
+                userDefaults.set(end, forKey: DefaultsKey.feedEndDate)
+            } else {
+                userDefaults.removeObject(forKey: DefaultsKey.feedEndDate)
+            }
+        } else {
+            userDefaults.removeObject(forKey: DefaultsKey.feedVersion)
+            userDefaults.removeObject(forKey: DefaultsKey.feedStartDate)
+            userDefaults.removeObject(forKey: DefaultsKey.feedEndDate)
+        }
+    }
+
+    private func clearMetadataInDefaults() {
+        userDefaults.removeObject(forKey: DefaultsKey.lastUpdatedAt)
+        userDefaults.removeObject(forKey: DefaultsKey.etag)
+        userDefaults.removeObject(forKey: DefaultsKey.lastModified)
+        userDefaults.removeObject(forKey: DefaultsKey.feedVersion)
+        userDefaults.removeObject(forKey: DefaultsKey.feedStartDate)
+        userDefaults.removeObject(forKey: DefaultsKey.feedEndDate)
     }
 
     private func normalizedHeaderValue(_ key: String, from response: HTTPURLResponse) -> String? {
@@ -593,7 +835,8 @@ actor LiveGTFSRepository: GTFSRepository {
         tripsURL: URL,
         shapesURL: URL,
         stopsURL: URL,
-        stopTimesURL: URL
+        stopTimesURL: URL,
+        feedInfoText: String?
     ) throws -> GTFSStaticData {
         let tripsText = try String(contentsOf: tripsURL, encoding: .utf8)
         let shapesText = try String(contentsOf: shapesURL, encoding: .utf8)
@@ -603,12 +846,16 @@ actor LiveGTFSRepository: GTFSRepository {
         let trips = GTFSParsers.parseTrips(tripsText)
         let shapesByID = GTFSParsers.parseShapes(shapesText)
         let stopsByID = GTFSParsers.parseStops(stopsText)
-        let routeStops = GTFSParsers.parseRouteStops(
+        let routeStopSchedules = GTFSParsers.parseRouteStopSchedules(
             stopTimesText: stopTimesText,
             representativeTripByRoute: trips.representativeTripByRoute,
             routeByTripID: trips.routeByTripID,
             stopsByID: stopsByID
         )
+        var routeStops: [RouteKey: [BusStop]] = [:]
+        for (routeKey, schedules) in routeStopSchedules {
+            routeStops[routeKey] = schedules.map(\.stop)
+        }
 
         var routeShapes: [String: [String: [CLLocationCoordinate2D]]] = [:]
         var shapeCoordinatesByID: [String: [CLLocationCoordinate2D]] = [:]
@@ -632,9 +879,11 @@ actor LiveGTFSRepository: GTFSRepository {
         return GTFSStaticData(
             routeShapes: routeShapes,
             routeStops: routeStops,
+            routeStopSchedules: routeStopSchedules,
             shapeCoordinatesByID: shapeCoordinatesByID,
             routeShapeIDsByKey: routeShapeIDsByKey,
-            routeDirectionLabels: trips.directionLabelByRoute
+            routeDirectionLabels: trips.directionLabelByRoute,
+            feedInfo: feedInfoText.flatMap(GTFSParsers.parseFeedInfo)
         )
     }
 }

@@ -47,10 +47,15 @@ actor SearchSuggestionEngine {
         var results: [BusSuggestion] = []
         var seen: Set<String> = []
 
-        let liveCandidates = vehicles.compactMap { vehicle -> (VehiclePosition, RouteKey)? in
+        let liveCandidates = vehicles.compactMap { vehicle -> (vehicle: VehiclePosition, key: RouteKey)? in
             guard let route = vehicle.route else { return nil }
             let key = RouteKey(route: route, direction: vehicle.direction.map(String.init) ?? "0")
             return (vehicle, key)
+        }
+
+        var vehiclesByRoute: [RouteKey: [VehiclePosition]] = [:]
+        for candidate in liveCandidates {
+            vehiclesByRoute[candidate.key, default: []].append(candidate.vehicle)
         }
 
         for (vehicle, key) in liveCandidates {
@@ -73,9 +78,7 @@ actor SearchSuggestionEngine {
         for key in nearbyRoutes {
             let id = "near-\(key.route)-\(key.direction)"
             guard seen.insert(id).inserted else { continue }
-            let routeVehicles = vehicles.filter { v in
-                v.route == key.route && (v.direction.map(String.init) ?? "0") == key.direction
-            }
+            let routeVehicles = vehiclesByRoute[key] ?? []
             let metrics = stopMetrics(for: key, userLocation: userLocation, vehicles: routeVehicles, routeStops: routeStops)
             results.append(
                     BusSuggestion(
@@ -121,13 +124,11 @@ actor SearchSuggestionEngine {
               let stops = routeStops[routeKey],
               !stops.isEmpty else { return nil }
 
-        let userPoint = CLLocation(latitude: userLocation.latitude, longitude: userLocation.longitude)
         var nearestStop: BusStop?
         var minUserDistance = CLLocationDistance.greatestFiniteMagnitude
 
         for stop in stops {
-            let stopPoint = CLLocation(latitude: stop.coord.latitude, longitude: stop.coord.longitude)
-            let distance = userPoint.distance(from: stopPoint)
+            let distance = planarDistanceMeters(from: userLocation, to: stop.coord)
             if distance < minUserDistance {
                 minUserDistance = distance
                 nearestStop = stop
@@ -138,9 +139,7 @@ actor SearchSuggestionEngine {
 
         let eta: Int?
         if let nearestVehicle = nearestVehicle(to: nearestStop, from: vehicles) {
-            let vehiclePoint = CLLocation(latitude: nearestVehicle.coord.latitude, longitude: nearestVehicle.coord.longitude)
-            let stopPoint = CLLocation(latitude: nearestStop.coord.latitude, longitude: nearestStop.coord.longitude)
-            let seconds = vehiclePoint.distance(from: stopPoint) / busSpeedMetersPerSecond
+            let seconds = planarDistanceMeters(from: nearestVehicle.coord, to: nearestStop.coord) / busSpeedMetersPerSecond
             eta = max(1, Int(round(seconds / 60)))
         } else {
             eta = nil
@@ -151,13 +150,19 @@ actor SearchSuggestionEngine {
 
     private func nearestVehicle(to stop: BusStop, from vehicles: [VehiclePosition]) -> VehiclePosition? {
         guard !vehicles.isEmpty else { return nil }
-        let stopPoint = CLLocation(latitude: stop.coord.latitude, longitude: stop.coord.longitude)
 
         return vehicles.min { lhs, rhs in
-            let lhsPoint = CLLocation(latitude: lhs.coord.latitude, longitude: lhs.coord.longitude)
-            let rhsPoint = CLLocation(latitude: rhs.coord.latitude, longitude: rhs.coord.longitude)
-            return lhsPoint.distance(from: stopPoint) < rhsPoint.distance(from: stopPoint)
+            planarDistanceMeters(from: lhs.coord, to: stop.coord) < planarDistanceMeters(from: rhs.coord, to: stop.coord)
         }
+    }
+
+    private func planarDistanceMeters(from lhs: CLLocationCoordinate2D, to rhs: CLLocationCoordinate2D) -> CLLocationDistance {
+        let latMeters = 111_132.92
+        let avgLatitude = (lhs.latitude + rhs.latitude) * 0.5
+        let lonMeters = max(1.0, 111_412.84 * cos(avgLatitude * .pi / 180))
+        let dx = (rhs.longitude - lhs.longitude) * lonMeters
+        let dy = (rhs.latitude - lhs.latitude) * latMeters
+        return sqrt(dx * dx + dy * dy)
     }
 
     private func displayDirection(routeVehicles: [VehiclePosition], fallbackDirectionID: String) -> String {

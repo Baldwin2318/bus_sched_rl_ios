@@ -8,7 +8,32 @@ private struct TraceArrowPoint: Identifiable {
     let angle: Double
 }
 
+private struct LivePulseDot: View {
+    let isActive: Bool
+    @State private var pulse = false
+
+    var body: some View {
+        Circle()
+            .fill(isActive ? Color.green : Color.gray)
+            .frame(width: 9, height: 9)
+            .scaleEffect(isActive && pulse ? 1.3 : 1.0)
+            .opacity(isActive && pulse ? 0.55 : 1.0)
+            .onAppear {
+                pulse = isActive
+            }
+            .onChange(of: isActive) { _, active in
+                pulse = active
+            }
+            .animation(
+                isActive ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true) : .default,
+                value: pulse
+            )
+    }
+}
+
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
+
     @StateObject private var vm = BusMapViewModel()
     @StateObject private var locationService = LocationService()
 
@@ -16,6 +41,7 @@ struct ContentView: View {
     @State private var didCenterToUser = false
     @State private var tracePhase = 0
     @State private var showTodaySchedules = false
+    @State private var showSettings = false
 
     private let traceTimer = Timer.publish(every: 0.45, on: .main, in: .common).autoconnect()
 
@@ -82,6 +108,7 @@ struct ContentView: View {
                     HStack(alignment: .center, spacing: 10) {
                         todaySchedulesButton
                         Spacer()
+                        liveToggleButton
                         locateMeButton
                         refreshButton
                     }
@@ -91,17 +118,32 @@ struct ContentView: View {
             }
             .navigationTitle("STM Bus Map")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showSettings = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                    .accessibilityLabel("Open settings")
+                }
+            }
             .safeAreaInset(edge: .top) {
-                HStack {
+                HStack(spacing: 8) {
                     statusPill
                     Spacer()
+                    liveStatusPill
                 }
                 .padding(.horizontal, 12)
             }
         }
         .task {
             vm.loadIfNeeded()
+            vm.setScenePhase(scenePhase)
             locationService.requestAccessAndStart()
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            vm.setScenePhase(newPhase)
         }
         .onReceive(locationService.$location.compactMap { $0 }) { location in
             vm.updateUserLocation(location)
@@ -122,6 +164,25 @@ struct ContentView: View {
         .sheet(isPresented: $showTodaySchedules) {
             todaySchedulesSheet
                 .presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $showSettings) {
+            settingsSheet
+                .presentationDetents([.medium, .large])
+        }
+        .sheet(
+            isPresented: Binding(
+                get: { vm.selectedBusDetail != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        vm.dismissBusDetail()
+                    }
+                }
+            )
+        ) {
+            if let detail = vm.selectedBusDetail {
+                busDetailSheet(for: detail)
+                    .presentationDetents([.medium, .large])
+            }
         }
     }
 
@@ -187,6 +248,20 @@ struct ContentView: View {
         }
     }
 
+    private var liveStatusPill: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            HStack(spacing: 6) {
+                LivePulseDot(isActive: !vm.isLiveUpdatesPaused)
+                Text(liveStatusText(at: context.date))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.primary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(.ultraThinMaterial, in: Capsule())
+        }
+    }
+
     private var refreshButton: some View {
         Button {
             vm.refreshLiveBuses()
@@ -203,6 +278,20 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .disabled(vm.isRefreshing)
+    }
+
+    private var liveToggleButton: some View {
+        Button {
+            vm.toggleLiveUpdatesPaused()
+        } label: {
+            Image(systemName: vm.isLiveUpdatesPaused ? "play.fill" : "pause.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+                .padding(11)
+                .background(.ultraThinMaterial, in: Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(vm.isLiveUpdatesPaused ? "Resume live updates" : "Pause live updates")
     }
 
     private var locateMeButton: some View {
@@ -283,6 +372,99 @@ struct ContentView: View {
         }
     }
 
+    private var settingsSheet: some View {
+        NavigationStack {
+            Form {
+                Section("GTFS Data") {
+                    LabeledContent("Last updated", value: formattedLastUpdated(vm.gtfsCacheMetadata.lastUpdatedAt))
+                    LabeledContent("Feed validity", value: feedValidityText())
+                    if let feedVersion = vm.gtfsCacheMetadata.feedInfo?.feedVersion, !feedVersion.isEmpty {
+                        LabeledContent("Feed version", value: feedVersion)
+                    }
+
+                    HStack {
+                        Text("Staleness")
+                        Spacer()
+                        Circle()
+                            .fill(stalenessColor())
+                            .frame(width: 10, height: 10)
+                        Text(vm.gtfsStalenessLevel().label)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Button {
+                        vm.refreshStaticDataNow()
+                    } label: {
+                        HStack(spacing: 8) {
+                            if vm.isRefreshingStaticData {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                            Text(vm.isRefreshingStaticData ? "Updating..." : "Update Now")
+                        }
+                    }
+                    .disabled(vm.isRefreshingStaticData)
+
+                    Text(cacheStatusText())
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        showSettings = false
+                    }
+                }
+            }
+        }
+    }
+
+    private func busDetailSheet(for detail: BusDetailPresentation) -> some View {
+        NavigationStack {
+            List {
+                Section {
+                    LabeledContent("Route", value: "\(detail.route) \(detail.directionText)")
+                    LabeledContent("Data source", value: detail.source.rawValue)
+                }
+
+                if detail.rows.isEmpty {
+                    Section {
+                        Text("No stop predictions available.")
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Section("Upcoming Stops") {
+                        ForEach(detail.rows) { row in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(row.stopName)
+                                    .font(.headline)
+                                Text(stopTimeText(for: row))
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                Text(row.source.rawValue)
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(row.source == .live ? .green : .secondary)
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Bus Details")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        vm.dismissBusDetail()
+                    }
+                }
+            }
+        }
+    }
+
     private func scheduleDetail(for suggestion: BusSuggestion) -> String {
         var chunks: [String] = []
         if let stop = suggestion.nearestStopName, !stop.isEmpty {
@@ -298,6 +480,31 @@ struct ContentView: View {
         return chunks.joined(separator: " • ")
     }
 
+    private func liveStatusText(at now: Date) -> String {
+        if vm.isLiveUpdatesPaused {
+            return "Paused"
+        }
+        guard let last = vm.lastVehicleRefreshAt else {
+            return "Waiting for live feed..."
+        }
+        let seconds = max(0, Int(now.timeIntervalSince(last)))
+        return "Updated \(seconds)s ago"
+    }
+
+    private func stopTimeText(for row: BusDetailStopRow) -> String {
+        var chunks: [String] = []
+        if let arrival = row.arrivalText {
+            chunks.append("Arrive \(arrival)")
+        }
+        if let departure = row.departureText {
+            chunks.append("Depart \(departure)")
+        }
+        if chunks.isEmpty {
+            return "No time available"
+        }
+        return chunks.joined(separator: " • ")
+    }
+
     private func clockTime(afterMinutes minutes: Int) -> String {
         let date = Calendar.current.date(byAdding: .minute, value: minutes, to: Date()) ?? Date()
         return date.formatted(date: .omitted, time: .shortened)
@@ -306,6 +513,42 @@ struct ContentView: View {
     private func markerText(for vehicle: VehiclePosition) -> String {
         let route = vehicle.route ?? "--"
         return "\(route) \(vm.directionText(for: vehicle))"
+    }
+
+    private func formattedLastUpdated(_ date: Date?) -> String {
+        guard let date else { return "Never" }
+        return date.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    private func feedValidityText() -> String {
+        guard let feedInfo = vm.gtfsCacheMetadata.feedInfo else { return "Unknown" }
+        let start = feedInfo.feedStartDate?.formatted(date: .abbreviated, time: .omitted) ?? "--"
+        let end = feedInfo.feedEndDate?.formatted(date: .abbreviated, time: .omitted) ?? "--"
+        return "\(start) to \(end)"
+    }
+
+    private func stalenessColor() -> Color {
+        switch vm.gtfsStalenessLevel() {
+        case .fresh:
+            return .green
+        case .warning:
+            return .yellow
+        case .expired:
+            return .red
+        }
+    }
+
+    private func cacheStatusText() -> String {
+        if vm.isRefreshingStaticData {
+            return "Updating..."
+        }
+        if !vm.staticDataRefreshStatus.isEmpty {
+            return vm.staticDataRefreshStatus
+        }
+        if vm.gtfsCacheMetadata.lastUpdatedAt == nil {
+            return "No local cache found yet."
+        }
+        return "Up to date"
     }
 
     private func traceArrowPoints() -> [TraceArrowPoint] {

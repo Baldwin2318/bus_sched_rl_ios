@@ -30,6 +30,44 @@ struct BusSuggestion: Identifiable, Hashable {
     }
 }
 
+enum GTFSStalenessLevel {
+    case fresh
+    case warning
+    case expired
+
+    var label: String {
+        switch self {
+        case .fresh:
+            return "Fresh"
+        case .warning:
+            return "Aging"
+        case .expired:
+            return "Expired"
+        }
+    }
+}
+
+enum StopTimeSourceLabel: String {
+    case live = "Live"
+    case scheduled = "Scheduled"
+}
+
+struct BusDetailStopRow: Identifiable, Hashable {
+    let id: String
+    let stopName: String
+    let arrivalText: String?
+    let departureText: String?
+    let source: StopTimeSourceLabel
+}
+
+struct BusDetailPresentation: Identifiable, Hashable {
+    let id: String
+    let route: String
+    let directionText: String
+    let source: StopTimeSourceLabel
+    let rows: [BusDetailStopRow]
+}
+
 @MainActor
 final class BusMapViewModel: ObservableObject {
     @Published private(set) var vehicles: [VehiclePosition] = []
@@ -37,11 +75,18 @@ final class BusMapViewModel: ObservableObject {
     @Published private(set) var nearbyScheduleSuggestions: [BusSuggestion] = []
     @Published private(set) var selectedRouteShape: [CLLocationCoordinate2D] = []
     @Published private(set) var selectedBusID: String?
+    @Published private(set) var selectedBusDetail: BusDetailPresentation?
     @Published private(set) var availableRoutes: [String] = []
     @Published private(set) var phase: BusMapPhase = .idle
     @Published private(set) var isRefreshing = false
     @Published private(set) var busLayerOpacity = 1.0
     @Published private(set) var lastTraceSource: String = "none"
+    @Published private(set) var isLiveUpdatesPaused = false
+    @Published private(set) var lastVehicleRefreshAt: Date?
+
+    @Published private(set) var gtfsCacheMetadata: GTFSCacheMetadata = .empty
+    @Published private(set) var isRefreshingStaticData = false
+    @Published private(set) var staticDataRefreshStatus = ""
 
     private let gtfsRepository: GTFSRepository
     private let realtimeRepository: RealtimeRepository
@@ -51,17 +96,22 @@ final class BusMapViewModel: ObservableObject {
 
     private var routeShapes: [String: [String: [CLLocationCoordinate2D]]] = [:]
     private var routeStops: [RouteKey: [BusStop]] = [:]
+    private var routeStopSchedules: [RouteKey: [RouteStopSchedule]] = [:]
     private var shapeCoordinatesByID: [String: [CLLocationCoordinate2D]] = [:]
     private var routeShapeIDsByKey: [RouteKey: [String]] = [:]
     private var routeDirectionLabels: [RouteKey: String] = [:]
+    private var tripUpdatesByTripID: [String: TripUpdatePayload] = [:]
     private var userLocation: CLLocationCoordinate2D?
     private var hasLoadedStaticData = false
-    private var refreshTask: Task<Void, Never>?
+    private var isSceneActive = true
+    private var livePollingTask: Task<Void, Never>?
+    private var staticRefreshTask: Task<Void, Never>?
     private var suggestionTask: Task<Void, Never>?
     private var suggestionToken = 0
 
     private let nearbyVehicleDistance: CLLocationDistance = 2500
     private let nearbyRouteDistance: CLLocationDistance = 600
+    private let livePollInterval: Duration = .seconds(20)
 
     var statusMessage: String {
         switch phase {
@@ -85,7 +135,8 @@ final class BusMapViewModel: ObservableObject {
     }
 
     deinit {
-        refreshTask?.cancel()
+        livePollingTask?.cancel()
+        staticRefreshTask?.cancel()
         suggestionTask?.cancel()
     }
 
@@ -94,23 +145,38 @@ final class BusMapViewModel: ObservableObject {
         phase = .loading("Loading route data...")
 
         Task {
+            await refreshCacheMetadata()
             do {
                 let staticData = try await gtfsRepository.loadStaticData()
-                routeShapes = staticData.routeShapes
-                routeStops = staticData.routeStops
-                shapeCoordinatesByID = staticData.shapeCoordinatesByID
-                routeShapeIDsByKey = staticData.routeShapeIDsByKey
-                routeDirectionLabels = staticData.routeDirectionLabels
-                availableRoutes = staticData.availableRoutes
-                hasLoadedStaticData = true
-                await routeIndex.rebuild(from: staticData.routeShapes)
+                await applyStaticData(staticData)
+                await refreshCacheMetadata()
                 phase = .ready
                 recomputeDisplayedVehicles()
                 scheduleSuggestionRefresh()
+                startLivePollingIfNeeded()
                 refreshLiveBuses()
             } catch {
                 phase = .error("Failed to load routes: \(error.localizedDescription)")
             }
+        }
+    }
+
+    func setScenePhase(_ phase: ScenePhase) {
+        isSceneActive = phase == .active
+        if isSceneActive {
+            startLivePollingIfNeeded()
+        } else {
+            stopLivePolling()
+        }
+    }
+
+    func toggleLiveUpdatesPaused() {
+        isLiveUpdatesPaused.toggle()
+        if isLiveUpdatesPaused {
+            stopLivePolling()
+        } else {
+            startLivePollingIfNeeded()
+            refreshLiveBuses()
         }
     }
 
@@ -121,12 +187,18 @@ final class BusMapViewModel: ObservableObject {
     }
 
     func refreshLiveBuses() {
-        guard refreshTask == nil else { return }
-        refreshTask = Task { [weak self] in
+        Task {
+            await performSingleRefreshIfNeeded()
+        }
+    }
+
+    func refreshStaticDataNow() {
+        guard staticRefreshTask == nil else { return }
+        staticRefreshTask = Task { [weak self] in
             guard let self else { return }
-            await self.performSingleRefresh()
+            await self.performStaticRefreshNow()
             await MainActor.run {
-                self.refreshTask = nil
+                self.staticRefreshTask = nil
             }
         }
     }
@@ -141,10 +213,17 @@ final class BusMapViewModel: ObservableObject {
         )
         selectedRouteShape = result.trace
         lastTraceSource = result.source
+        selectedBusDetail = buildBusDetail(for: bus)
+    }
+
+    func dismissBusDetail() {
+        selectedBusDetail = nil
+        selectedBusID = nil
     }
 
     func applySuggestion(_ suggestion: BusSuggestion) {
         selectedBusID = nil
+        selectedBusDetail = nil
         if let direction = suggestion.directionID {
             selectedRouteShape = routeShapes[suggestion.route]?[direction] ?? []
         } else {
@@ -162,6 +241,33 @@ final class BusMapViewModel: ObservableObject {
         scheduleSuggestionRefresh()
     }
 
+    func gtfsStalenessLevel(referenceDate: Date = Date()) -> GTFSStalenessLevel {
+        if let feedEndDate = gtfsCacheMetadata.feedInfo?.feedEndDate {
+            if referenceDate > feedEndDate {
+                return .expired
+            }
+            let warningWindowStart = Calendar.current.date(byAdding: .day, value: -7, to: feedEndDate) ?? feedEndDate
+            if referenceDate >= warningWindowStart {
+                return .warning
+            }
+        }
+
+        if let lastUpdatedAt = gtfsCacheMetadata.lastUpdatedAt {
+            let age = referenceDate.timeIntervalSince(lastUpdatedAt)
+            if age < 7 * 24 * 60 * 60 {
+                return .fresh
+            }
+            return .warning
+        }
+
+        return .warning
+    }
+
+    private func performSingleRefreshIfNeeded() async {
+        guard !isRefreshing else { return }
+        await performSingleRefresh()
+    }
+
     private func performSingleRefresh() async {
         await MainActor.run {
             isRefreshing = true
@@ -171,11 +277,18 @@ final class BusMapViewModel: ObservableObject {
         }
 
         do {
-            let latest = try await realtimeRepository.fetchVehicles()
+            let snapshot = try await realtimeRepository.fetchSnapshot()
             await MainActor.run {
-                vehicles = latest
+                vehicles = snapshot.vehicles
+                var updatesByTripID: [String: TripUpdatePayload] = [:]
+                for update in snapshot.tripUpdates where updatesByTripID[update.tripID] == nil {
+                    updatesByTripID[update.tripID] = update
+                }
+                tripUpdatesByTripID = updatesByTripID
+                lastVehicleRefreshAt = Date()
                 recomputeDisplayedVehicles()
                 scheduleSuggestionRefresh()
+                refreshSelectedBusDetailIfNeeded()
                 phase = .ready
             }
         } catch {
@@ -190,6 +303,76 @@ final class BusMapViewModel: ObservableObject {
             }
             isRefreshing = false
         }
+    }
+
+    private func startLivePollingIfNeeded() {
+        guard hasLoadedStaticData,
+              isSceneActive,
+              !isLiveUpdatesPaused,
+              livePollingTask == nil else { return }
+
+        livePollingTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                await self.performSingleRefreshIfNeeded()
+                do {
+                    try await Task.sleep(for: self.livePollInterval)
+                } catch {
+                    break
+                }
+            }
+            await MainActor.run {
+                self.livePollingTask = nil
+            }
+        }
+    }
+
+    private func stopLivePolling() {
+        livePollingTask?.cancel()
+        livePollingTask = nil
+    }
+
+    private func performStaticRefreshNow() async {
+        await MainActor.run {
+            isRefreshingStaticData = true
+            staticDataRefreshStatus = ""
+        }
+
+        do {
+            let refreshed = try await gtfsRepository.refreshStaticData(force: true)
+            await applyStaticData(refreshed)
+            await refreshCacheMetadata()
+            await MainActor.run {
+                phase = .ready
+                staticDataRefreshStatus = "Updated just now"
+            }
+        } catch {
+            await MainActor.run {
+                staticDataRefreshStatus = "Update failed: \(error.localizedDescription)"
+            }
+        }
+
+        await MainActor.run {
+            isRefreshingStaticData = false
+        }
+    }
+
+    private func refreshCacheMetadata() async {
+        gtfsCacheMetadata = await gtfsRepository.cacheMetadata()
+    }
+
+    private func applyStaticData(_ staticData: GTFSStaticData) async {
+        routeShapes = staticData.routeShapes
+        routeStops = staticData.routeStops
+        routeStopSchedules = staticData.routeStopSchedules
+        shapeCoordinatesByID = staticData.shapeCoordinatesByID
+        routeShapeIDsByKey = staticData.routeShapeIDsByKey
+        routeDirectionLabels = staticData.routeDirectionLabels
+        availableRoutes = staticData.availableRoutes
+        hasLoadedStaticData = true
+        await routeIndex.rebuild(from: staticData.routeShapes)
+        scheduleSuggestionRefresh()
+        refreshSelectedBusDetailIfNeeded()
     }
 
     private func recomputeDisplayedVehicles() {
@@ -239,6 +422,191 @@ final class BusMapViewModel: ObservableObject {
                 self.nearbyScheduleSuggestions = nearbySuggestions
             }
         }
+    }
+
+    private func refreshSelectedBusDetailIfNeeded() {
+        guard let selectedBusID,
+              let bus = vehicles.first(where: { $0.id == selectedBusID }) else {
+            if selectedBusID != nil {
+                selectedBusDetail = nil
+            }
+            return
+        }
+        selectedBusDetail = buildBusDetail(for: bus)
+    }
+
+    private func buildBusDetail(for bus: VehiclePosition) -> BusDetailPresentation? {
+        guard let route = bus.route else { return nil }
+        let directionID = bus.direction.map(String.init) ?? "0"
+        let key = RouteKey(route: route, direction: directionID)
+        let direction = routeDirectionLabels[key] ?? frenchCardinal(for: bus.heading)
+
+        let liveRows = liveRows(for: bus, routeKey: key)
+        if !liveRows.isEmpty {
+            return BusDetailPresentation(
+                id: bus.id,
+                route: route,
+                directionText: direction,
+                source: .live,
+                rows: liveRows
+            )
+        }
+
+        return BusDetailPresentation(
+            id: bus.id,
+            route: route,
+            directionText: direction,
+            source: .scheduled,
+            rows: scheduledRows(for: key, busCoordinate: bus.coord)
+        )
+    }
+
+    private func liveRows(for bus: VehiclePosition, routeKey: RouteKey) -> [BusDetailStopRow] {
+        guard let tripUpdate = resolveTripUpdate(for: bus, routeKey: routeKey) else { return [] }
+
+        let schedules = routeStopSchedules[routeKey] ?? []
+        var scheduleLookupByStopID: [String: RouteStopSchedule] = [:]
+        var scheduleLookupBySequence: [Int: RouteStopSchedule] = [:]
+        for schedule in schedules {
+            if scheduleLookupByStopID[schedule.stop.id] == nil {
+                scheduleLookupByStopID[schedule.stop.id] = schedule
+            }
+            if scheduleLookupBySequence[schedule.sequence] == nil {
+                scheduleLookupBySequence[schedule.sequence] = schedule
+            }
+        }
+        let now = Date()
+
+        let rows: [BusDetailStopRow] = tripUpdate.stopTimeUpdates
+            .sorted { lhs, rhs in
+                if let leftSequence = lhs.stopSequence, let rightSequence = rhs.stopSequence, leftSequence != rightSequence {
+                    return leftSequence < rightSequence
+                }
+                let leftTime = lhs.arrivalTime ?? lhs.departureTime ?? .distantFuture
+                let rightTime = rhs.arrivalTime ?? rhs.departureTime ?? .distantFuture
+                return leftTime < rightTime
+            }
+            .compactMap { stopUpdate in
+                let primaryTime = stopUpdate.arrivalTime ?? stopUpdate.departureTime
+                if let primaryTime, primaryTime < now.addingTimeInterval(-120) {
+                    return nil
+                }
+
+                let stopSchedule: RouteStopSchedule?
+                if let stopID = stopUpdate.stopID, let byID = scheduleLookupByStopID[stopID] {
+                    stopSchedule = byID
+                } else if let sequence = stopUpdate.stopSequence {
+                    stopSchedule = scheduleLookupBySequence[sequence]
+                } else {
+                    stopSchedule = nil
+                }
+
+                let stopName: String
+                if let stopSchedule {
+                    stopName = stopSchedule.stop.name
+                } else if let stopID = stopUpdate.stopID {
+                    stopName = "Stop \(stopID)"
+                } else if let sequence = stopUpdate.stopSequence {
+                    stopName = "Stop #\(sequence)"
+                } else {
+                    stopName = "Upcoming stop"
+                }
+
+                let rowID = "\(stopUpdate.stopID ?? "na")-\(stopUpdate.stopSequence ?? -1)-\(stopName)"
+                return BusDetailStopRow(
+                    id: rowID,
+                    stopName: stopName,
+                    arrivalText: formatRealtimeTime(stopUpdate.arrivalTime),
+                    departureText: formatRealtimeTime(stopUpdate.departureTime),
+                    source: .live
+                )
+            }
+
+        return Array(rows.prefix(18))
+    }
+
+    private func scheduledRows(for routeKey: RouteKey, busCoordinate: CLLocationCoordinate2D) -> [BusDetailStopRow] {
+        guard let schedules = routeStopSchedules[routeKey], !schedules.isEmpty else { return [] }
+
+        let startIndex = nearestStopIndex(to: busCoordinate, in: schedules)
+        let slice = schedules[startIndex...]
+
+        let rows = slice.map { schedule in
+            BusDetailStopRow(
+                id: "scheduled-\(schedule.stop.id)-\(schedule.sequence)",
+                stopName: schedule.stop.name,
+                arrivalText: formatScheduledTime(schedule.scheduledArrival),
+                departureText: formatScheduledTime(schedule.scheduledDeparture),
+                source: .scheduled
+            )
+        }
+
+        return Array(rows.prefix(18))
+    }
+
+    private func nearestStopIndex(to coordinate: CLLocationCoordinate2D, in schedules: [RouteStopSchedule]) -> Int {
+        guard !schedules.isEmpty else { return 0 }
+        let busLocation = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+
+        var nearestIndex = 0
+        var nearestDistance = CLLocationDistance.greatestFiniteMagnitude
+        for (index, schedule) in schedules.enumerated() {
+            let stopLocation = CLLocation(latitude: schedule.stop.coord.latitude, longitude: schedule.stop.coord.longitude)
+            let distance = busLocation.distance(from: stopLocation)
+            if distance < nearestDistance {
+                nearestDistance = distance
+                nearestIndex = index
+            }
+        }
+
+        return nearestIndex
+    }
+
+    private func resolveTripUpdate(for bus: VehiclePosition, routeKey: RouteKey) -> TripUpdatePayload? {
+        if let tripID = bus.tripID, let exact = tripUpdatesByTripID[tripID] {
+            return exact
+        }
+
+        return tripUpdatesByTripID.values.first { update in
+            guard let routeID = update.routeID, routeID == routeKey.route else { return false }
+            if let directionID = update.directionID {
+                return String(directionID) == routeKey.direction
+            }
+            return true
+        }
+    }
+
+    private func formatRealtimeTime(_ date: Date?) -> String? {
+        guard let date else { return nil }
+        return date.formatted(date: .omitted, time: .shortened)
+    }
+
+    private func formatScheduledTime(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let parts = trimmed.split(separator: ":")
+        guard parts.count >= 2,
+              let hour = Int(parts[0]),
+              let minute = Int(parts[1]) else {
+            return trimmed
+        }
+
+        var components = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        components.hour = hour % 24
+        components.minute = minute
+        components.second = 0
+
+        guard var date = Calendar.current.date(from: components) else {
+            return trimmed
+        }
+        let dayOffset = hour / 24
+        if dayOffset > 0, let rolled = Calendar.current.date(byAdding: .day, value: dayOffset, to: date) {
+            date = rolled
+        }
+
+        return date.formatted(date: .omitted, time: .shortened)
     }
 
     private func frenchCardinal(for heading: Double) -> String {

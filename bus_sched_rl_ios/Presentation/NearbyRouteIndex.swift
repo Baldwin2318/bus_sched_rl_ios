@@ -29,11 +29,14 @@ actor NearbyRouteIndex {
 
     func routeKeys(near location: CLLocationCoordinate2D?, maxDistance: CLLocationDistance) -> Set<RouteKey> {
         guard let location else { return [] }
-        let userPoint = CLLocation(latitude: location.latitude, longitude: location.longitude)
+        let maxDistanceSquared = maxDistance * maxDistance
+        let latMeters = 111_132.92
+        let lonMeters = max(1.0, 111_412.84 * cos(location.latitude * .pi / 180))
         var result: Set<RouteKey> = []
         for sampled in sampledPoints {
-            let point = CLLocation(latitude: sampled.lat, longitude: sampled.lon)
-            if userPoint.distance(from: point) <= maxDistance {
+            let dx = (sampled.lon - location.longitude) * lonMeters
+            let dy = (sampled.lat - location.latitude) * latMeters
+            if (dx * dx + dy * dy) <= maxDistanceSquared {
                 result.insert(sampled.routeKey)
             }
         }
