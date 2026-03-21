@@ -44,6 +44,9 @@ actor STMRealtimeRepository: RealtimeRepository {
 
         let (data, _) = try await session.data(for: request)
         let feed = try TransitRealtime_FeedMessage(serializedBytes: data)
+        let feedTimestamp: Date? = feed.header.hasTimestamp
+            ? Date(timeIntervalSince1970: TimeInterval(feed.header.timestamp))
+            : nil
 
         return feed.entity.compactMap { entity in
             guard entity.hasVehicle else { return nil }
@@ -61,7 +64,10 @@ actor STMRealtimeRepository: RealtimeRepository {
                 coord: CLLocationCoordinate2D(
                     latitude: CLLocationDegrees(latitude),
                     longitude: CLLocationDegrees(longitude)
-                )
+                ),
+                lastUpdatedAt: vehicle.hasTimestamp
+                    ? Date(timeIntervalSince1970: TimeInterval(vehicle.timestamp))
+                    : feedTimestamp
             )
         }
     }

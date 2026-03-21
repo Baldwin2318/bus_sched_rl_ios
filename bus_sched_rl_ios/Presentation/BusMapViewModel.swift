@@ -30,7 +30,7 @@ struct BusSuggestion: Identifiable, Hashable {
     }
 }
 
-enum GTFSStalenessLevel {
+enum GTFSStalenessLevel: Equatable {
     case fresh
     case warning
     case expired
@@ -47,7 +47,13 @@ enum GTFSStalenessLevel {
     }
 }
 
-enum StopTimeSourceLabel: String {
+enum VehicleFreshnessLevel: Equatable {
+    case live
+    case aging
+    case stale
+}
+
+enum StopTimeSourceLabel: String, Equatable {
     case live = "Live"
     case scheduled = "Scheduled"
 }
@@ -66,6 +72,49 @@ struct BusDetailPresentation: Identifiable, Hashable {
     let directionText: String
     let source: StopTimeSourceLabel
     let rows: [BusDetailStopRow]
+}
+
+struct MapStopPresentation: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let coord: CLLocationCoordinate2D
+
+    static func == (lhs: MapStopPresentation, rhs: MapStopPresentation) -> Bool {
+        lhs.id == rhs.id &&
+        lhs.name == rhs.name &&
+        lhs.coord.latitude == rhs.coord.latitude &&
+        lhs.coord.longitude == rhs.coord.longitude
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(name)
+        hasher.combine(coord.latitude)
+        hasher.combine(coord.longitude)
+    }
+}
+
+struct StopArrivalPresentation: Identifiable, Hashable {
+    let id: String
+    let route: String
+    let directionID: String
+    let directionText: String
+    let arrivalText: String?
+    let source: StopTimeSourceLabel
+}
+
+struct StopArrivalsPresentation: Identifiable, Hashable {
+    let id: String
+    let stopName: String
+    let arrivals: [StopArrivalPresentation]
+}
+
+struct NextBusGlance: Equatable {
+    let route: String
+    let directionText: String
+    let etaMinutes: Int?
+    let nearestStopName: String?
+    let metersAway: Int?
 }
 
 enum LiveRefreshTrigger {
@@ -111,6 +160,7 @@ final class BusMapViewModel: ObservableObject {
     @Published private(set) var selectedRouteShape: [CLLocationCoordinate2D] = []
     @Published private(set) var selectedBusID: String?
     @Published private(set) var selectedBusDetail: BusDetailPresentation?
+    @Published private(set) var selectedRouteID: String?
     @Published private(set) var availableRoutes: [String] = []
     @Published private(set) var phase: BusMapPhase = .idle
     @Published private(set) var isRefreshing = false
@@ -137,6 +187,9 @@ final class BusMapViewModel: ObservableObject {
     private var shapeCoordinatesByID: [String: [CLLocationCoordinate2D]] = [:]
     private var routeShapeIDsByKey: [RouteKey: [String]] = [:]
     private var routeDirectionLabels: [RouteKey: String] = [:]
+    private var routeStylesByRouteID: [String: GTFSRouteStyle] = [:]
+    private var allStopsByID: [String: BusStop] = [:]
+    private var routeKeysByStopID: [String: Set<RouteKey>] = [:]
     private var tripUpdatesByTripID: [String: TripUpdatePayload] = [:]
     private var userLocation: CLLocationCoordinate2D?
     private var hasLoadedStaticData = false
@@ -152,6 +205,8 @@ final class BusMapViewModel: ObservableObject {
 
     private let nearbyVehicleDistance: CLLocationDistance = 2500
     private let nearbyRouteDistance: CLLocationDistance = 600
+    private let liveFreshnessThreshold: TimeInterval = 35
+    private let agingFreshnessThreshold: TimeInterval = 90
     private let livePollInterval: Duration
 
     var statusMessage: String {
@@ -165,6 +220,31 @@ final class BusMapViewModel: ObservableObject {
         case .error(let message):
             return message
         }
+    }
+
+    var nextBusGlance: NextBusGlance? {
+        guard !nearbyScheduleSuggestions.isEmpty else { return nil }
+        let withEta = nearbyScheduleSuggestions.filter { $0.etaMinutes != nil }
+        let primarySuggestion: BusSuggestion
+        if let nearestETA = withEta.min(by: { lhs, rhs in
+            (lhs.etaMinutes ?? Int.max) < (rhs.etaMinutes ?? Int.max)
+        }) {
+            primarySuggestion = nearestETA
+        } else if let closest = nearbyScheduleSuggestions.min(by: { lhs, rhs in
+            (lhs.metersAway ?? Int.max) < (rhs.metersAway ?? Int.max)
+        }) {
+            primarySuggestion = closest
+        } else {
+            primarySuggestion = nearbyScheduleSuggestions[0]
+        }
+
+        return NextBusGlance(
+            route: primarySuggestion.route,
+            directionText: primarySuggestion.displayDirection,
+            etaMinutes: primarySuggestion.etaMinutes,
+            nearestStopName: primarySuggestion.nearestStopName,
+            metersAway: primarySuggestion.metersAway
+        )
     }
 
     init(
@@ -257,6 +337,7 @@ final class BusMapViewModel: ObservableObject {
 
     func selectBus(_ bus: VehiclePosition) {
         selectedBusID = bus.id
+        selectedRouteID = bus.route
         let result = traceResolver.resolveTrace(
             bus: bus,
             routeShapes: routeShapes,
@@ -276,6 +357,7 @@ final class BusMapViewModel: ObservableObject {
     func applySuggestion(_ suggestion: BusSuggestion) {
         selectedBusID = nil
         selectedBusDetail = nil
+        selectedRouteID = suggestion.route
         if let direction = suggestion.directionID {
             selectedRouteShape = routeShapes[suggestion.route]?[direction] ?? []
         } else {
@@ -283,10 +365,132 @@ final class BusMapViewModel: ObservableObject {
         }
     }
 
+    func visibleStops(
+        around center: CLLocationCoordinate2D?,
+        maxDistanceMeters: CLLocationDistance,
+        maxCount: Int
+    ) -> [MapStopPresentation] {
+        guard maxCount > 0 else { return [] }
+        guard let center else {
+            return allStopsByID.values
+                .prefix(maxCount)
+                .map { stop in
+                    MapStopPresentation(id: stop.id, name: stop.name, coord: stop.coord)
+                }
+        }
+
+        let centerPoint = CLLocation(latitude: center.latitude, longitude: center.longitude)
+        let candidateStops = allStopsByID.values.compactMap { stop -> (stop: BusStop, distance: CLLocationDistance)? in
+            let stopPoint = CLLocation(latitude: stop.coord.latitude, longitude: stop.coord.longitude)
+            let distance = centerPoint.distance(from: stopPoint)
+            if distance <= maxDistanceMeters {
+                return (stop, distance)
+            }
+            return nil
+        }
+        .sorted { $0.distance < $1.distance }
+        .prefix(maxCount)
+
+        return candidateStops.map { candidate in
+            MapStopPresentation(
+                id: candidate.stop.id,
+                name: candidate.stop.name,
+                coord: candidate.stop.coord
+            )
+        }
+    }
+
+    func stopArrivals(for stopID: String) -> StopArrivalsPresentation? {
+        guard let stop = allStopsByID[stopID] else { return nil }
+        let routeKeys = Array(routeKeysByStopID[stopID] ?? []).sorted { lhs, rhs in
+            if lhs.route != rhs.route {
+                return lhs.route.localizedStandardCompare(rhs.route) == .orderedAscending
+            }
+            return lhs.direction.localizedStandardCompare(rhs.direction) == .orderedAscending
+        }
+        guard !routeKeys.isEmpty else { return nil }
+
+        let now = Date()
+        var rows: [(date: Date, row: StopArrivalPresentation)] = []
+        for key in routeKeys {
+            let routeSchedules = routeStopSchedules[key] ?? []
+            let routeDirection = routeDirectionLabels[key] ?? "Direction \(key.direction)"
+            let scheduleForStop = routeSchedules.first(where: { $0.stop.id == stopID })
+            let liveDate = liveArrivalDate(for: stopID, routeKey: key, now: now)
+            let scheduledDate = scheduledTimeDate(scheduleForStop?.scheduledArrival ?? scheduleForStop?.scheduledDeparture)
+
+            let source: StopTimeSourceLabel
+            let displayDate: Date?
+            if let liveDate {
+                source = .live
+                displayDate = liveDate
+            } else {
+                source = .scheduled
+                displayDate = scheduledDate
+            }
+
+            let row = StopArrivalPresentation(
+                id: "\(key.route)-\(key.direction)-\(stopID)",
+                route: key.route,
+                directionID: key.direction,
+                directionText: routeDirection,
+                arrivalText: formatStopArrival(displayDate, fallbackRaw: scheduleForStop?.scheduledArrival ?? scheduleForStop?.scheduledDeparture),
+                source: source
+            )
+
+            rows.append((displayDate ?? .distantFuture, row))
+        }
+
+        let orderedRows = rows.sorted { lhs, rhs in
+            if lhs.date != rhs.date {
+                return lhs.date < rhs.date
+            }
+            if lhs.row.route != rhs.row.route {
+                return lhs.row.route.localizedStandardCompare(rhs.row.route) == .orderedAscending
+            }
+            return lhs.row.directionID.localizedStandardCompare(rhs.row.directionID) == .orderedAscending
+        }
+        .map(\.row)
+
+        return StopArrivalsPresentation(
+            id: stop.id,
+            stopName: stop.name,
+            arrivals: orderedRows
+        )
+    }
+
+    func routeDetail(route: String, directionID: String) -> BusDetailPresentation? {
+        let key = RouteKey(route: route, direction: directionID)
+        guard let schedules = routeStopSchedules[key], !schedules.isEmpty else { return nil }
+        let directionText = routeDirectionLabels[key] ?? "Direction \(directionID)"
+        let rows = schedules.map { schedule in
+            BusDetailStopRow(
+                id: "route-\(schedule.stop.id)-\(schedule.sequence)",
+                stopName: schedule.stop.name,
+                arrivalText: formatScheduledTime(schedule.scheduledArrival),
+                departureText: formatScheduledTime(schedule.scheduledDeparture),
+                source: .scheduled
+            )
+        }
+
+        return BusDetailPresentation(
+            id: "route-\(route)-\(directionID)",
+            route: route,
+            directionText: directionText,
+            source: .scheduled,
+            rows: Array(rows.prefix(24))
+        )
+    }
+
     func directionText(for vehicle: VehiclePosition) -> String {
         guard let route = vehicle.route else { return frenchCardinal(for: vehicle.heading) }
         let key = RouteKey(route: route, direction: vehicle.direction.map(String.init) ?? "0")
         return routeDirectionLabels[key] ?? frenchCardinal(for: vehicle.heading)
+    }
+
+    func routeStyle(for routeID: String?) -> GTFSRouteStyle? {
+        guard let routeID else { return nil }
+        return routeStylesByRouteID[routeID]
     }
 
     func refreshSuggestionsForCurrentState() {
@@ -313,6 +517,21 @@ final class BusMapViewModel: ObservableObject {
         }
 
         return .warning
+    }
+
+    func freshnessLevel(for vehicle: VehiclePosition, referenceDate: Date = Date()) -> VehicleFreshnessLevel {
+        guard let timestamp = vehicle.lastUpdatedAt ?? lastVehicleRefreshAt else {
+            return .stale
+        }
+
+        let age = max(0, referenceDate.timeIntervalSince(timestamp))
+        if age <= liveFreshnessThreshold {
+            return .live
+        }
+        if age <= agingFreshnessThreshold {
+            return .aging
+        }
+        return .stale
     }
 
     private func performSingleRefreshIfNeeded(trigger: LiveRefreshTrigger) async {
@@ -508,11 +727,28 @@ final class BusMapViewModel: ObservableObject {
         shapeCoordinatesByID = staticData.shapeCoordinatesByID
         routeShapeIDsByKey = staticData.routeShapeIDsByKey
         routeDirectionLabels = staticData.routeDirectionLabels
+        routeStylesByRouteID = staticData.routeStylesByRouteID
+        rebuildStopIndexes()
         availableRoutes = staticData.availableRoutes
         hasLoadedStaticData = true
         await routeIndex.rebuild(from: staticData.routeShapes)
         scheduleSuggestionRefresh()
         refreshSelectedBusDetailIfNeeded()
+    }
+
+    private func rebuildStopIndexes() {
+        var nextStopsByID: [String: BusStop] = [:]
+        var nextRouteKeysByStopID: [String: Set<RouteKey>] = [:]
+
+        for (routeKey, stops) in routeStops {
+            for stop in stops {
+                nextStopsByID[stop.id] = stop
+                nextRouteKeysByStopID[stop.id, default: []].insert(routeKey)
+            }
+        }
+
+        allStopsByID = nextStopsByID
+        routeKeysByStopID = nextRouteKeysByStopID
     }
 
     private func recomputeDisplayedVehicles() {
@@ -735,16 +971,49 @@ final class BusMapViewModel: ObservableObject {
         return date.formatted(date: .omitted, time: .shortened)
     }
 
+    private func formatStopArrival(_ date: Date?, fallbackRaw: String?) -> String? {
+        if let date {
+            return date.formatted(date: .omitted, time: .shortened)
+        }
+        return formatScheduledTime(fallbackRaw)
+    }
+
+    private func liveArrivalDate(for stopID: String, routeKey: RouteKey, now: Date) -> Date? {
+        tripUpdatesByTripID.values.compactMap { update in
+            guard update.routeID == routeKey.route else { return nil }
+            if let directionID = update.directionID, String(directionID) != routeKey.direction {
+                return nil
+            }
+
+            return update.stopTimeUpdates
+                .filter { stopUpdate in stopUpdate.stopID == stopID }
+                .compactMap { stopUpdate in stopUpdate.arrivalTime ?? stopUpdate.departureTime }
+                .filter { $0 >= now.addingTimeInterval(-120) }
+                .min()
+        }
+        .min()
+    }
+
     private func formatScheduledTime(_ raw: String?) -> String? {
+        if let date = scheduledTimeDate(raw) {
+            return date.formatted(date: .omitted, time: .shortened)
+        }
+
         guard let raw else { return nil }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
 
+    private func scheduledTimeDate(_ raw: String?) -> Date? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
         let parts = trimmed.split(separator: ":")
         guard parts.count >= 2,
               let hour = Int(parts[0]),
               let minute = Int(parts[1]) else {
-            return trimmed
+            return nil
         }
 
         var components = Calendar.current.dateComponents([.year, .month, .day], from: Date())
@@ -752,15 +1021,13 @@ final class BusMapViewModel: ObservableObject {
         components.minute = minute
         components.second = 0
 
-        guard var date = Calendar.current.date(from: components) else {
-            return trimmed
-        }
+        guard var date = Calendar.current.date(from: components) else { return nil }
         let dayOffset = hour / 24
         if dayOffset > 0, let rolled = Calendar.current.date(byAdding: .day, value: dayOffset, to: date) {
             date = rolled
         }
 
-        return date.formatted(date: .omitted, time: .shortened)
+        return date
     }
 
     private func frenchCardinal(for heading: Double) -> String {

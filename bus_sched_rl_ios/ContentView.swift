@@ -1,6 +1,7 @@
 import SwiftUI
 import MapKit
 import Combine
+import UIKit
 
 private struct TraceArrowPoint: Identifiable {
     let id: Int
@@ -106,6 +107,132 @@ struct MarkerScalePolicy {
     }
 }
 
+private enum TransitSemanticPalette {
+    static let liveSource = Color.green.opacity(0.92)
+    static let scheduledSource = Color.orange.opacity(0.9)
+    static let liveFreshness = Color.green.opacity(0.85)
+    static let agingFreshness = Color.yellow.opacity(0.82)
+    static let staleFreshness = Color.red.opacity(0.74)
+    static let fallbackRoute = Color.blue.opacity(0.9)
+    static let fallbackRouteText = Color.white
+}
+
+private enum TransitColorResolver {
+    static func routeColor(style: GTFSRouteStyle?) -> Color {
+        if let color = color(fromHex: style?.routeColorHex) {
+            return color
+        }
+        return TransitSemanticPalette.fallbackRoute
+    }
+
+    static func routeTextColor(style: GTFSRouteStyle?) -> Color {
+        if let color = color(fromHex: style?.routeTextColorHex) {
+            return color
+        }
+        return TransitSemanticPalette.fallbackRouteText
+    }
+
+    private static func color(fromHex hex: String?) -> Color? {
+        guard let hex else { return nil }
+        let normalized = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "#", with: "")
+            .uppercased()
+        guard normalized.count == 6, let value = Int(normalized, radix: 16) else { return nil }
+
+        let red = Double((value >> 16) & 0xFF) / 255.0
+        let green = Double((value >> 8) & 0xFF) / 255.0
+        let blue = Double(value & 0xFF) / 255.0
+        return Color(red: red, green: green, blue: blue)
+    }
+}
+
+private enum ContrastAccessibility {
+    static let minimumContrastRatio = 4.5
+
+    static func readableTextColor(preferred: Color, on background: Color) -> Color {
+        if contrastRatio(preferred, background) >= minimumContrastRatio {
+            return preferred
+        }
+
+        let whiteContrast = contrastRatio(.white, background)
+        let blackContrast = contrastRatio(.black, background)
+        return whiteContrast >= blackContrast ? .white : .black
+    }
+
+    private static func contrastRatio(_ foreground: Color, _ background: Color) -> Double {
+        let foregroundLuminance = relativeLuminance(of: foreground)
+        let backgroundLuminance = relativeLuminance(of: background)
+        let lighter = max(foregroundLuminance, backgroundLuminance)
+        let darker = min(foregroundLuminance, backgroundLuminance)
+        return (lighter + 0.05) / (darker + 0.05)
+    }
+
+    private static func relativeLuminance(of color: Color) -> Double {
+        let components = rgbComponents(for: color)
+        let r = linearized(components.red)
+        let g = linearized(components.green)
+        let b = linearized(components.blue)
+        return (0.2126 * r) + (0.7152 * g) + (0.0722 * b)
+    }
+
+    private static func linearized(_ component: Double) -> Double {
+        if component <= 0.03928 {
+            return component / 12.92
+        }
+        return pow((component + 0.055) / 1.055, 2.4)
+    }
+
+    private static func rgbComponents(for color: Color) -> (red: Double, green: Double, blue: Double) {
+        let uiColor = UIColor(color)
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 0
+
+        if uiColor.getRed(&red, green: &green, blue: &blue, alpha: &alpha) {
+            return (Double(red), Double(green), Double(blue))
+        }
+
+        var white: CGFloat = 0
+        if uiColor.getWhite(&white, alpha: &alpha) {
+            let value = Double(white)
+            return (value, value, value)
+        }
+
+        return (0, 0, 0)
+    }
+}
+
+private enum MapSheetRoute: Identifiable, Equatable {
+    case todaySchedules
+    case settings
+    case stopArrivals(StopArrivalsPresentation)
+    case routeDetail(BusDetailPresentation)
+    case busDetail(BusDetailPresentation)
+
+    var id: String {
+        switch self {
+        case .todaySchedules:
+            return "todaySchedules"
+        case .settings:
+            return "settings"
+        case .stopArrivals(let stop):
+            return "stopArrivals:\(stop.id)"
+        case .routeDetail(let detail):
+            return "routeDetail:\(detail.id)"
+        case .busDetail(let detail):
+            return "busDetail:\(detail.id)"
+        }
+    }
+
+    var isBusDetail: Bool {
+        if case .busDetail = self {
+            return true
+        }
+        return false
+    }
+}
+
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
 
@@ -115,12 +242,19 @@ struct ContentView: View {
     @State private var mapCamera = MapCameraPosition.automatic
     @State private var didCenterToUser = false
     @State private var tracePhase = 0
-    @State private var showTodaySchedules = false
-    @State private var showSettings = false
+    @State private var activeSheet: MapSheetRoute?
     @State private var markerZoomScale = MarkerScalePolicy.default.initialScale
+    @State private var mapCenterCoordinate: CLLocationCoordinate2D?
+    @State private var mapCameraDistance: CLLocationDistance = 0
+    @State private var freshnessReferenceDate = Date()
 
     private let markerScalePolicy = MarkerScalePolicy.default
+    private let stopMarkerMaxVisibleDistance: CLLocationDistance = 5_500
+    private let stopMarkerRadiusMeters: CLLocationDistance = 2_200
+    private let stopMarkerMaxCount = 80
+    private let recenterVisibilityThresholdMeters: CLLocationDistance = 75
     private let traceTimer = Timer.publish(every: 0.45, on: .main, in: .common).autoconnect()
+    private let freshnessTimer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
 
     var body: some View {
         NavigationStack {
@@ -133,64 +267,71 @@ struct ContentView: View {
 
                     if !vm.selectedRouteShape.isEmpty {
                         MapPolyline(coordinates: vm.selectedRouteShape)
-                            .stroke(.blue.opacity(0.85), style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round))
+                            .stroke(Color.white.opacity(0.92), style: StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round))
+
+                        MapPolyline(coordinates: vm.selectedRouteShape)
+                            .stroke(selectedRouteColor.opacity(0.9), style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round))
 
                         ForEach(traceArrowPoints()) { point in
                             Annotation("", coordinate: point.coord) {
                                 Image(systemName: "arrow.forward.circle.fill")
                                     .font(.system(size: 18, weight: .bold))
-                                    .foregroundStyle(.white, .blue)
+                                    .foregroundStyle(selectedRouteTextColor, selectedRouteColor)
                                     .rotationEffect(.degrees(point.angle))
-                                    .shadow(color: .blue.opacity(0.35), radius: 4, x: 0, y: 2)
+                                    .shadow(color: .black.opacity(0.25), radius: 4, x: 0, y: 2)
+                            }
+                        }
+                    }
+
+                    ForEach(visibleStopAnnotations) { stop in
+                        Annotation(stop.name, coordinate: stop.coord) {
+                            StopMarkerView(name: stop.name) {
+                                if let arrivals = vm.stopArrivals(for: stop.id) {
+                                    activeSheet = .stopArrivals(arrivals)
+                                }
                             }
                         }
                     }
 
                     ForEach(vm.displayedVehicles) { vehicle in
                         Annotation(vehicle.route ?? "Bus", coordinate: vehicle.coord) {
-                            Button {
+                            BusMarkerView(
+                                title: markerText(for: vehicle),
+                                heading: vehicle.heading,
+                                fillColor: markerFillColor(for: vehicle),
+                                strokeColor: markerStrokeColor(for: vehicle),
+                                glyphColor: markerGlyphColor(for: vehicle),
+                                labelTextColor: markerLabelTextColor(for: vehicle),
+                                labelBackgroundColor: markerLabelBackgroundColor(for: vehicle),
+                                opacity: vm.busLayerOpacity * markerOpacityMultiplier(for: vehicle),
+                                scale: markerScale(for: vehicle),
+                                scaleAnimationDuration: markerScalePolicy.animationDuration
+                            ) {
                                 vm.selectBus(vehicle)
-                            } label: {
-                                VStack(spacing: 3) {
-                                    ZStack {
-                                        Circle()
-                                            .fill(Color.black.opacity(0.78))
-                                            .frame(width: 34, height: 34)
-                                        Image(systemName: "bus.fill")
-                                            .font(.system(size: 14, weight: .bold))
-                                            .foregroundStyle(.white)
-                                            .rotationEffect(.degrees(vehicle.heading))
-                                    }
-                                    Text(markerText(for: vehicle))
-                                        .font(.system(size: 10, weight: .bold))
-                                        .lineLimit(1)
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 3)
-                                        .background(.ultraThinMaterial, in: Capsule())
-                                }
-                                .opacity(vm.busLayerOpacity)
-                                .scaleEffect(markerScale(for: vehicle))
-                                .animation(.easeInOut(duration: markerScalePolicy.animationDuration), value: markerZoomScale)
-                                .shadow(color: .black.opacity(0.22), radius: 6, x: 0, y: 3)
                             }
-                            .buttonStyle(.plain)
                         }
                     }
                 }
                 .mapStyle(.standard(elevation: .realistic))
                 .onMapCameraChange { context in
+                    mapCenterCoordinate = context.camera.centerCoordinate
+                    mapCameraDistance = context.camera.distance
                     updateMarkerScale(for: context.camera.distance)
                 }
                 .ignoresSafeArea()
 
                 VStack(spacing: 10) {
+                    nextArrivalGlanceCard
+
                     HStack(alignment: .center, spacing: 10) {
-                        todaySchedulesButton
                         Spacer()
-                        liveToggleButton
-                        locateMeButton
+                        if shouldShowLocateMeButton {
+                            locateMeButton
+                                .transition(.scale(scale: 0.92).combined(with: .opacity))
+                        }
                         refreshButton
                     }
+                    .animation(.easeInOut(duration: 0.2), value: shouldShowLocateMeButton)
                 }
                 .padding(.horizontal, 12)
                 .padding(.bottom, 14)
@@ -200,7 +341,7 @@ struct ContentView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        showSettings = true
+                        activeSheet = .settings
                     } label: {
                         Image(systemName: "gearshape")
                     }
@@ -240,47 +381,128 @@ struct ContentView: View {
             guard !vm.selectedRouteShape.isEmpty else { return }
             tracePhase = (tracePhase + 1) % 1000
         }
-        .sheet(isPresented: $showTodaySchedules) {
-            todaySchedulesSheet
-                .presentationDetents([.medium, .large])
+        .onReceive(freshnessTimer) { now in
+            freshnessReferenceDate = now
         }
-        .sheet(isPresented: $showSettings) {
-            settingsSheet
-                .presentationDetents([.medium, .large])
+        .onChange(of: vm.selectedBusDetail) { _, detail in
+            syncBusDetailSheet(with: detail)
         }
-        .sheet(
-            isPresented: Binding(
-                get: { vm.selectedBusDetail != nil },
-                set: { isPresented in
-                    if !isPresented {
-                        vm.dismissBusDetail()
-                    }
-                }
-            )
-        ) {
-            if let detail = vm.selectedBusDetail {
-                busDetailSheet(for: detail)
-                    .presentationDetents([.medium, .large])
-            }
+        .sheet(item: activeSheetBinding) { route in
+            sheetView(for: route)
         }
     }
 
-    private var todaySchedulesButton: some View {
-        Button {
-            vm.refreshSuggestionsForCurrentState()
-            showTodaySchedules = true
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "calendar")
-                Text("Today's Schedules")
+    private var activeSheetBinding: Binding<MapSheetRoute?> {
+        Binding(
+            get: { activeSheet },
+            set: { next in
+                if next == nil, activeSheet?.isBusDetail == true {
+                    vm.dismissBusDetail()
+                }
+                activeSheet = next
             }
-            .font(.subheadline.weight(.semibold))
-            .foregroundStyle(.primary)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .background(.ultraThinMaterial, in: Capsule())
+        )
+    }
+
+    @ViewBuilder
+    private func sheetView(for route: MapSheetRoute) -> some View {
+        switch route {
+        case .todaySchedules:
+            todaySchedulesSheet
+                .presentationDetents([.medium, .large])
+        case .settings:
+            settingsSheet
+                .presentationDetents([.medium, .large])
+        case .stopArrivals(let stopArrivals):
+            stopArrivalsSheet(for: stopArrivals)
+                .presentationDetents([.fraction(0.25), .medium, .large])
+        case .routeDetail(let detail):
+            busDetailSheet(for: detail)
+                .presentationDetents([.medium, .large])
+        case .busDetail(let detail):
+            busDetailSheet(for: detail)
+                .presentationDetents([.medium, .large])
+        }
+    }
+
+    private func presentTodaySchedules() {
+        vm.refreshSuggestionsForCurrentState()
+        activeSheet = .todaySchedules
+    }
+
+    private func syncBusDetailSheet(with detail: BusDetailPresentation?) {
+        guard let detail else {
+            if activeSheet?.isBusDetail == true {
+                activeSheet = nil
+            }
+            return
+        }
+
+        if activeSheet == nil || activeSheet?.isBusDetail == true {
+            activeSheet = .busDetail(detail)
+        }
+    }
+
+    private var nextArrivalGlanceCard: some View {
+        Button {
+            presentTodaySchedules()
+        } label: {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Next Bus")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    if let glance = vm.nextBusGlance {
+                        Text("\(glance.route) \(glance.directionText)")
+                            .font(.headline.weight(.semibold))
+                            .foregroundStyle(routeColor(for: glance.route))
+                            .lineLimit(1)
+                        Text(nextBusSupplementalLine(for: glance))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    } else {
+                        Text("Finding nearby arrivals...")
+                            .font(.headline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        Text("Live ETA will appear here")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+
+                Spacer(minLength: 8)
+
+                VStack(spacing: 0) {
+                    if let etaMinutes = vm.nextBusGlance?.etaMinutes {
+                        Text("\(etaMinutes)")
+                            .font(.system(size: 34, weight: .heavy, design: .rounded))
+                            .foregroundStyle(routeColor(for: vm.nextBusGlance?.route))
+                            .lineLimit(1)
+                        Text("min")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("--")
+                            .font(.system(size: 34, weight: .heavy, design: .rounded))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        Text("ETA")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(minWidth: 56)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(nextBusAccessibilityLabel())
     }
 
     private var statusPill: some View {
@@ -328,18 +550,22 @@ struct ContentView: View {
         .disabled(vm.isRefreshing)
     }
 
-    private var liveToggleButton: some View {
-        Button {
-            vm.toggleLiveUpdatesPaused()
-        } label: {
-            Image(systemName: vm.isLiveUpdatesPaused ? "play.fill" : "pause.fill")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.primary)
-                .padding(11)
-                .background(.ultraThinMaterial, in: Circle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(vm.isLiveUpdatesPaused ? "Resume live updates" : "Pause live updates")
+    private var visibleStopAnnotations: [MapStopPresentation] {
+        guard mapCameraDistance > 0, mapCameraDistance <= stopMarkerMaxVisibleDistance else { return [] }
+        let center = mapCenterCoordinate ?? locationService.location
+        return vm.visibleStops(
+            around: center,
+            maxDistanceMeters: stopMarkerRadiusMeters,
+            maxCount: stopMarkerMaxCount
+        )
+    }
+
+    private var shouldShowLocateMeButton: Bool {
+        guard let userLocation = locationService.location else { return false }
+        guard let mapCenterCoordinate else { return false }
+        let userPoint = CLLocation(latitude: userLocation.latitude, longitude: userLocation.longitude)
+        let centerPoint = CLLocation(latitude: mapCenterCoordinate.latitude, longitude: mapCenterCoordinate.longitude)
+        return centerPoint.distance(from: userPoint) > recenterVisibilityThresholdMeters
     }
 
     private var locateMeButton: some View {
@@ -355,12 +581,57 @@ struct ContentView: View {
             Image(systemName: "location.fill")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.primary)
-                .padding(11)
+                .frame(width: 44, height: 44)
                 .background(.ultraThinMaterial, in: Circle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Go to current location")
         .disabled(locationService.location == nil)
+    }
+
+    private func stopArrivalsSheet(for presentation: StopArrivalsPresentation) -> some View {
+        NavigationStack {
+            List {
+                Section {
+                    Text("Tap a route to view the full stop sequence and ETAs.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                if presentation.arrivals.isEmpty {
+                    Section {
+                        Text("No arrivals available for this stop.")
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Section("Next Arrivals") {
+                        ForEach(presentation.arrivals) { arrival in
+                            Button {
+                                openRouteDetailFromStop(arrival)
+                            } label: {
+                                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("\(arrival.route) \(arrival.directionText)")
+                                            .font(.headline)
+                                        Text(arrival.source.rawValue)
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(sourceColor(arrival.source))
+                                    }
+                                    Spacer()
+                                    Text(arrival.arrivalText ?? "--")
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(.primary)
+                                }
+                                .padding(.vertical, 2)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+            .navigationTitle(presentation.stopName)
+            .navigationBarTitleDisplayMode(.inline)
+        }
     }
 
     private var todaySchedulesSheet: some View {
@@ -463,7 +734,7 @@ struct ContentView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") {
-                        showSettings = false
+                        activeSheet = nil
                     }
                 }
             }
@@ -494,7 +765,7 @@ struct ContentView: View {
                                     .foregroundStyle(.secondary)
                                 Text(row.source.rawValue)
                                     .font(.caption2.weight(.semibold))
-                                    .foregroundStyle(row.source == .live ? .green : .secondary)
+                                    .foregroundStyle(sourceColor(row.source))
                             }
                             .padding(.vertical, 2)
                         }
@@ -506,7 +777,10 @@ struct ContentView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") {
-                        vm.dismissBusDetail()
+                        if vm.selectedBusDetail?.id == detail.id {
+                            vm.dismissBusDetail()
+                        }
+                        activeSheet = nil
                     }
                 }
             }
@@ -563,11 +837,129 @@ struct ContentView: View {
         return "\(route) \(vm.directionText(for: vehicle))"
     }
 
+    private func nextBusSupplementalLine(for glance: NextBusGlance) -> String {
+        var chunks: [String] = []
+        if let stop = glance.nearestStopName, !stop.isEmpty {
+            chunks.append(stop)
+        }
+        if let metersAway = glance.metersAway {
+            chunks.append("\(metersAway)m away")
+        }
+        if chunks.isEmpty {
+            return "Tap for full arrivals"
+        }
+        return chunks.joined(separator: " • ")
+    }
+
+    private func nextBusAccessibilityLabel() -> String {
+        guard let glance = vm.nextBusGlance else {
+            return "Next bus ETA loading"
+        }
+
+        if let eta = glance.etaMinutes {
+            return "Next bus route \(glance.route), \(glance.directionText), arriving in \(eta) minutes"
+        }
+        return "Next bus route \(glance.route), \(glance.directionText), ETA unavailable"
+    }
+
+    private func openRouteDetailFromStop(_ arrival: StopArrivalPresentation) {
+        guard let detail = vm.routeDetail(route: arrival.route, directionID: arrival.directionID) else { return }
+        activeSheet = .routeDetail(detail)
+    }
+
     private func markerScale(for vehicle: VehiclePosition) -> CGFloat {
         markerScalePolicy.composedScale(
             baseScale: markerZoomScale,
             isSelected: vm.selectedBusID == vehicle.id
         )
+    }
+
+    private var selectedRouteColor: Color {
+        routeColor(for: vm.selectedRouteID)
+    }
+
+    private var selectedRouteTextColor: Color {
+        let preferred = routeTextColor(for: vm.selectedRouteID)
+        return ContrastAccessibility.readableTextColor(preferred: preferred, on: selectedRouteColor)
+    }
+
+    private func routeColor(for routeID: String?) -> Color {
+        TransitColorResolver.routeColor(style: vm.routeStyle(for: routeID))
+    }
+
+    private func routeTextColor(for routeID: String?) -> Color {
+        TransitColorResolver.routeTextColor(style: vm.routeStyle(for: routeID))
+    }
+
+    private func sourceColor(_ source: StopTimeSourceLabel) -> Color {
+        switch source {
+        case .live:
+            return TransitSemanticPalette.liveSource
+        case .scheduled:
+            return TransitSemanticPalette.scheduledSource
+        }
+    }
+
+    private func markerFillColor(for vehicle: VehiclePosition) -> Color {
+        let routeColor = routeColor(for: vehicle.route)
+        switch vm.freshnessLevel(for: vehicle, referenceDate: freshnessReferenceDate) {
+        case .live:
+            return routeColor.opacity(0.94)
+        case .aging:
+            return routeColor.opacity(0.78)
+        case .stale:
+            return routeColor.opacity(0.58)
+        }
+    }
+
+    private func markerStrokeColor(for vehicle: VehiclePosition) -> Color {
+        switch vm.freshnessLevel(for: vehicle, referenceDate: freshnessReferenceDate) {
+        case .live:
+            return TransitSemanticPalette.liveFreshness
+        case .aging:
+            return TransitSemanticPalette.agingFreshness
+        case .stale:
+            return TransitSemanticPalette.staleFreshness
+        }
+    }
+
+    private func markerGlyphColor(for vehicle: VehiclePosition) -> Color {
+        let preferred = routeTextColor(for: vehicle.route)
+        return ContrastAccessibility.readableTextColor(
+            preferred: preferred,
+            on: markerFillColor(for: vehicle)
+        )
+    }
+
+    private func markerLabelTextColor(for vehicle: VehiclePosition) -> Color {
+        let preferred = routeTextColor(for: vehicle.route)
+        return ContrastAccessibility.readableTextColor(
+            preferred: preferred,
+            on: markerLabelBackgroundColor(for: vehicle)
+        )
+    }
+
+    private func markerLabelBackgroundColor(for vehicle: VehiclePosition) -> Color {
+        let routeColor = routeColor(for: vehicle.route)
+        switch vm.freshnessLevel(for: vehicle, referenceDate: freshnessReferenceDate) {
+        case .live:
+            return routeColor.opacity(0.94)
+        case .aging:
+            return routeColor.opacity(0.78)
+        case .stale:
+            return routeColor.opacity(0.62)
+        }
+    }
+
+    private func markerOpacityMultiplier(for vehicle: VehiclePosition) -> Double {
+        switch vm.freshnessLevel(for: vehicle, referenceDate: freshnessReferenceDate) {
+        case .live:
+            return 1.0
+        case .aging:
+            return 0.8
+        case .stale:
+            return 0.62
+        }
     }
 
     private func updateMarkerScale(for distance: CLLocationDistance) {

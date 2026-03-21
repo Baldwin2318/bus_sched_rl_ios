@@ -12,6 +12,11 @@ struct GTFSFeedInfo: Codable, Hashable {
     let feedEndDate: Date?
 }
 
+struct GTFSRouteStyle: Codable, Hashable {
+    let routeColorHex: String?
+    let routeTextColorHex: String?
+}
+
 struct GTFSCacheMetadata: Equatable {
     let lastUpdatedAt: Date?
     let etag: String?
@@ -60,6 +65,25 @@ struct VehiclePosition: Identifiable, Equatable {
     let direction: Int?
     let heading: Double
     let coord: CLLocationCoordinate2D
+    let lastUpdatedAt: Date?
+
+    init(
+        id: String,
+        tripID: String?,
+        route: String?,
+        direction: Int?,
+        heading: Double,
+        coord: CLLocationCoordinate2D,
+        lastUpdatedAt: Date? = nil
+    ) {
+        self.id = id
+        self.tripID = tripID
+        self.route = route
+        self.direction = direction
+        self.heading = heading
+        self.coord = coord
+        self.lastUpdatedAt = lastUpdatedAt
+    }
 
     static func == (lhs: VehiclePosition, rhs: VehiclePosition) -> Bool {
         lhs.id == rhs.id &&
@@ -68,7 +92,8 @@ struct VehiclePosition: Identifiable, Equatable {
         lhs.direction == rhs.direction &&
         lhs.heading == rhs.heading &&
         lhs.coord.latitude == rhs.coord.latitude &&
-        lhs.coord.longitude == rhs.coord.longitude
+        lhs.coord.longitude == rhs.coord.longitude &&
+        lhs.lastUpdatedAt == rhs.lastUpdatedAt
     }
 
     func interpolated(to target: VehiclePosition, fraction: Double) -> VehiclePosition {
@@ -81,7 +106,8 @@ struct VehiclePosition: Identifiable, Equatable {
             route: target.route ?? route,
             direction: target.direction ?? direction,
             heading: target.heading,
-            coord: CLLocationCoordinate2D(latitude: lat, longitude: lon)
+            coord: CLLocationCoordinate2D(latitude: lat, longitude: lon),
+            lastUpdatedAt: target.lastUpdatedAt ?? lastUpdatedAt
         )
     }
 }

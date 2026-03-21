@@ -9,6 +9,7 @@ struct GTFSStaticData {
     let shapeCoordinatesByID: [String: [CLLocationCoordinate2D]]
     let routeShapeIDsByKey: [RouteKey: [String]]
     let routeDirectionLabels: [RouteKey: String]
+    let routeStylesByRouteID: [String: GTFSRouteStyle]
     let feedInfo: GTFSFeedInfo?
 
     var availableRoutes: [String] {
@@ -175,6 +176,56 @@ private enum GTFSParsers {
         }
 
         return stopsByID
+    }
+
+    private static func normalizedColorHex(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = normalize(value).replacingOccurrences(of: "#", with: "").uppercased()
+        guard trimmed.count == 6 else { return nil }
+        let hexCharacters = CharacterSet(charactersIn: "0123456789ABCDEF")
+        guard trimmed.unicodeScalars.allSatisfy(hexCharacters.contains) else { return nil }
+        return trimmed
+    }
+
+    static func parseRouteStyles(_ text: String) -> [String: GTFSRouteStyle] {
+        var stylesByRouteID: [String: GTFSRouteStyle] = [:]
+        var isHeader = true
+        var header: [String: Int] = [:]
+
+        text.enumerateLines { line, _ in
+            if isHeader {
+                isHeader = false
+                header = headerIndexMap(line)
+                return
+            }
+            guard !line.isEmpty, let cols = try? CSVParser.parseLine(line) else { return }
+            guard let routeIDIdx = header["route_id"], routeIDIdx < cols.count else { return }
+
+            let routeID = normalize(cols[routeIDIdx])
+            guard !routeID.isEmpty else { return }
+
+            let routeColorHex: String?
+            if let routeColorIdx = header["route_color"], routeColorIdx < cols.count {
+                routeColorHex = normalizedColorHex(cols[routeColorIdx])
+            } else {
+                routeColorHex = nil
+            }
+
+            let routeTextColorHex: String?
+            if let routeTextColorIdx = header["route_text_color"], routeTextColorIdx < cols.count {
+                routeTextColorHex = normalizedColorHex(cols[routeTextColorIdx])
+            } else {
+                routeTextColorHex = nil
+            }
+
+            guard routeColorHex != nil || routeTextColorHex != nil else { return }
+            stylesByRouteID[routeID] = GTFSRouteStyle(
+                routeColorHex: routeColorHex,
+                routeTextColorHex: routeTextColorHex
+            )
+        }
+
+        return stylesByRouteID
     }
 
     private static func normalizedOptional(_ value: String?) -> String? {
@@ -387,12 +438,19 @@ private struct CachedRouteDirectionLabelEntry: Codable {
     let label: String
 }
 
+private struct CachedRouteStyleEntry: Codable {
+    let route: String
+    let routeColorHex: String?
+    let routeTextColorHex: String?
+}
+
 private struct GTFSStaticCachePayload: Codable {
     let routeShapes: [CachedRouteShape]
     let routeStopSchedules: [CachedRouteStopSchedulesEntry]
     let shapeCoordinates: [CachedShapeCoordinatesEntry]
     let routeShapeIDs: [CachedRouteShapeIDsEntry]
     let routeDirectionLabels: [CachedRouteDirectionLabelEntry]
+    let routeStyles: [CachedRouteStyleEntry]
     let feedInfo: GTFSFeedInfo?
 
     init(staticData: GTFSStaticData) {
@@ -427,6 +485,14 @@ private struct GTFSStaticCachePayload: Codable {
 
         routeDirectionLabels = staticData.routeDirectionLabels.map { key, label in
             CachedRouteDirectionLabelEntry(route: key.route, direction: key.direction, label: label)
+        }
+
+        routeStyles = staticData.routeStylesByRouteID.map { routeID, style in
+            CachedRouteStyleEntry(
+                route: routeID,
+                routeColorHex: style.routeColorHex,
+                routeTextColorHex: style.routeTextColorHex
+            )
         }
 
         feedInfo = staticData.feedInfo
@@ -464,6 +530,14 @@ private struct GTFSStaticCachePayload: Codable {
             nextDirectionLabels[key] = entry.label
         }
 
+        var nextRouteStyles: [String: GTFSRouteStyle] = [:]
+        for entry in routeStyles {
+            nextRouteStyles[entry.route] = GTFSRouteStyle(
+                routeColorHex: entry.routeColorHex,
+                routeTextColorHex: entry.routeTextColorHex
+            )
+        }
+
         return GTFSStaticData(
             routeShapes: nextRouteShapes,
             routeStops: nextRouteStops,
@@ -471,6 +545,7 @@ private struct GTFSStaticCachePayload: Codable {
             shapeCoordinatesByID: nextShapeCoordinates,
             routeShapeIDsByKey: nextRouteShapeIDs,
             routeDirectionLabels: nextDirectionLabels,
+            routeStylesByRouteID: nextRouteStyles,
             feedInfo: feedInfo
         )
     }
@@ -496,17 +571,17 @@ actor LiveGTFSRepository: GTFSRepository {
     private let persistedCacheDirectory: URL
     private let session: URLSession
     private let userDefaults: UserDefaults
-    private let cacheSchemaVersion = 2
+    private let cacheSchemaVersion = 3
     private let staleRevalidationInterval: TimeInterval = 24 * 60 * 60
     private var cachedData: GTFSStaticData?
     private var refreshTask: Task<Void, Never>?
 
     private var payloadURL: URL {
-        persistedCacheDirectory.appendingPathComponent("static_data_v2.plist")
+        persistedCacheDirectory.appendingPathComponent("static_data_v3.plist")
     }
 
     private var manifestURL: URL {
-        persistedCacheDirectory.appendingPathComponent("manifest_v2.plist")
+        persistedCacheDirectory.appendingPathComponent("manifest_v3.plist")
     }
 
     init(
@@ -640,6 +715,7 @@ actor LiveGTFSRepository: GTFSRepository {
         defer { try? FileManager.default.removeItem(at: extractionDirectory) }
 
         let tripsURL = extractionDirectory.appendingPathComponent("trips.txt")
+        let routesURL = extractionDirectory.appendingPathComponent("routes.txt")
         let shapesURL = extractionDirectory.appendingPathComponent("shapes.txt")
         let stopsURL = extractionDirectory.appendingPathComponent("stops.txt")
         let stopTimesURL = extractionDirectory.appendingPathComponent("stop_times.txt")
@@ -665,6 +741,7 @@ actor LiveGTFSRepository: GTFSRepository {
 
         return try parseStaticData(
             tripsURL: tripsURL,
+            routesURL: routesURL,
             shapesURL: shapesURL,
             stopsURL: stopsURL,
             stopTimesURL: stopTimesURL,
@@ -710,6 +787,7 @@ actor LiveGTFSRepository: GTFSRepository {
                     shapeCoordinatesByID: data.shapeCoordinatesByID,
                     routeShapeIDsByKey: data.routeShapeIDsByKey,
                     routeDirectionLabels: data.routeDirectionLabels,
+                    routeStylesByRouteID: data.routeStylesByRouteID,
                     feedInfo: feedInfo
                 )
             }
@@ -833,17 +911,25 @@ actor LiveGTFSRepository: GTFSRepository {
 
     private func parseStaticData(
         tripsURL: URL,
+        routesURL: URL,
         shapesURL: URL,
         stopsURL: URL,
         stopTimesURL: URL,
         feedInfoText: String?
     ) throws -> GTFSStaticData {
         let tripsText = try String(contentsOf: tripsURL, encoding: .utf8)
+        let routesText: String?
+        if FileManager.default.fileExists(atPath: routesURL.path) {
+            routesText = try String(contentsOf: routesURL, encoding: .utf8)
+        } else {
+            routesText = nil
+        }
         let shapesText = try String(contentsOf: shapesURL, encoding: .utf8)
         let stopsText = try String(contentsOf: stopsURL, encoding: .utf8)
         let stopTimesText = try String(contentsOf: stopTimesURL, encoding: .utf8)
 
         let trips = GTFSParsers.parseTrips(tripsText)
+        let routeStylesByRouteID = routesText.map(GTFSParsers.parseRouteStyles) ?? [:]
         let shapesByID = GTFSParsers.parseShapes(shapesText)
         let stopsByID = GTFSParsers.parseStops(stopsText)
         let routeStopSchedules = GTFSParsers.parseRouteStopSchedules(
@@ -883,6 +969,7 @@ actor LiveGTFSRepository: GTFSRepository {
             shapeCoordinatesByID: shapeCoordinatesByID,
             routeShapeIDsByKey: routeShapeIDsByKey,
             routeDirectionLabels: trips.directionLabelByRoute,
+            routeStylesByRouteID: routeStylesByRouteID,
             feedInfo: feedInfoText.flatMap(GTFSParsers.parseFeedInfo)
         )
     }
