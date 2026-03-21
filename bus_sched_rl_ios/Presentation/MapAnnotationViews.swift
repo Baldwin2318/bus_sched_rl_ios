@@ -11,21 +11,21 @@ struct StopMarkerView: View {
                 if isHighlighted {
                     Circle()
                         .stroke(Color.yellow.opacity(0.95), lineWidth: 3)
-                        .frame(width: 30, height: 30)
+                        .frame(width: 24, height: 24)
                         .shadow(color: .yellow.opacity(0.45), radius: 6, x: 0, y: 0)
                 }
                 Circle()
                     .fill(.white)
-                    .frame(width: 20, height: 20)
+                    .frame(width: 14, height: 14)
                 Circle()
                     .stroke(Color.white.opacity(0.95), lineWidth: 2.5)
-                    .frame(width: 22, height: 22)
+                    .frame(width: 16, height: 16)
                 Circle()
                     .stroke(Color.black.opacity(0.82), lineWidth: 1.5)
-                    .frame(width: 20, height: 20)
+                    .frame(width: 14, height: 14)
                 Circle()
                     .fill(Color.blue.opacity(0.9))
-                    .frame(width: 8, height: 8)
+                    .frame(width: 5, height: 5)
             }
             .shadow(color: .black.opacity(0.3), radius: 4, x: 0, y: 2)
         }
