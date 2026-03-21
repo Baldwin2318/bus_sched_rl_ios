@@ -31,6 +31,81 @@ private struct LivePulseDot: View {
     }
 }
 
+struct MarkerScalePolicy {
+    let minAltitude: CLLocationDistance
+    let maxAltitude: CLLocationDistance
+    let minScale: CGFloat
+    let maxScale: CGFloat
+    let selectedScaleBoost: CGFloat
+    let scaleUpdateThreshold: CGFloat
+    let animationDuration: TimeInterval
+
+    private let logMinAltitude: Double
+    private let logAltitudeRange: Double
+
+    static let `default` = MarkerScalePolicy(
+        minAltitude: 250,
+        maxAltitude: 24_000,
+        minScale: 0.7,
+        maxScale: 1.45,
+        selectedScaleBoost: 1.1,
+        scaleUpdateThreshold: 0.01,
+        animationDuration: 0.2
+    )
+
+    var initialScale: CGFloat {
+        scale(forAltitude: maxAltitude)
+    }
+
+    init(
+        minAltitude: CLLocationDistance,
+        maxAltitude: CLLocationDistance,
+        minScale: CGFloat,
+        maxScale: CGFloat,
+        selectedScaleBoost: CGFloat,
+        scaleUpdateThreshold: CGFloat,
+        animationDuration: TimeInterval
+    ) {
+        self.minAltitude = minAltitude
+        self.maxAltitude = maxAltitude
+        self.minScale = minScale
+        self.maxScale = maxScale
+        self.selectedScaleBoost = selectedScaleBoost
+        self.scaleUpdateThreshold = scaleUpdateThreshold
+        self.animationDuration = animationDuration
+
+        let safeMinAltitude = max(minAltitude, 1)
+        let safeMaxAltitude = max(maxAltitude, safeMinAltitude + 1)
+        let minLogValue = log(safeMinAltitude)
+        let maxLogValue = log(safeMaxAltitude)
+        logMinAltitude = minLogValue
+        logAltitudeRange = max(maxLogValue - minLogValue, .leastNonzeroMagnitude)
+    }
+
+    func scale(forAltitude altitude: CLLocationDistance) -> CGFloat {
+        let clampedAltitude = min(max(altitude, minAltitude), maxAltitude)
+        let clampedScaleMin = min(minScale, maxScale)
+        let clampedScaleMax = max(minScale, maxScale)
+        let logValue = log(max(clampedAltitude, 1))
+        let normalized = (logValue - logMinAltitude) / logAltitudeRange
+        let clampedNormalized = min(max(normalized, 0), 1)
+
+        let nextScale = Double(clampedScaleMax) - clampedNormalized * Double(clampedScaleMax - clampedScaleMin)
+        return CGFloat(nextScale)
+    }
+
+    func composedScale(baseScale: CGFloat, isSelected: Bool) -> CGFloat {
+        if isSelected {
+            return baseScale * selectedScaleBoost
+        }
+        return baseScale
+    }
+
+    func shouldApplyScale(current: CGFloat, next: CGFloat) -> Bool {
+        abs(current - next) >= scaleUpdateThreshold
+    }
+}
+
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
 
@@ -42,7 +117,9 @@ struct ContentView: View {
     @State private var tracePhase = 0
     @State private var showTodaySchedules = false
     @State private var showSettings = false
+    @State private var markerZoomScale = MarkerScalePolicy.default.initialScale
 
+    private let markerScalePolicy = MarkerScalePolicy.default
     private let traceTimer = Timer.publish(every: 0.45, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -92,7 +169,8 @@ struct ContentView: View {
                                         .background(.ultraThinMaterial, in: Capsule())
                                 }
                                 .opacity(vm.busLayerOpacity)
-                                .scaleEffect(vm.selectedBusID == vehicle.id ? 1.1 : 1.0)
+                                .scaleEffect(markerScale(for: vehicle))
+                                .animation(.easeInOut(duration: markerScalePolicy.animationDuration), value: markerZoomScale)
                                 .shadow(color: .black.opacity(0.22), radius: 6, x: 0, y: 3)
                             }
                             .buttonStyle(.plain)
@@ -100,11 +178,12 @@ struct ContentView: View {
                     }
                 }
                 .mapStyle(.standard(elevation: .realistic))
+                .onMapCameraChange { context in
+                    updateMarkerScale(for: context.camera.distance)
+                }
                 .ignoresSafeArea()
 
                 VStack(spacing: 10) {
-                    nearbyBusesStrip
-
                     HStack(alignment: .center, spacing: 10) {
                         todaySchedulesButton
                         Spacer()
@@ -183,37 +262,6 @@ struct ContentView: View {
                 busDetailSheet(for: detail)
                     .presentationDetents([.medium, .large])
             }
-        }
-    }
-
-    private var nearbyBusesStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                let nearby = Array(vm.nearbyScheduleSuggestions.prefix(6))
-                if nearby.isEmpty {
-                    Text("Finding nearby buses...")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(.ultraThinMaterial, in: Capsule())
-                } else {
-                    ForEach(nearby) { suggestion in
-                        Button {
-                            vm.applySuggestion(suggestion)
-                        } label: {
-                            Text(suggestion.title)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.primary)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
-                                .background(.ultraThinMaterial, in: Capsule())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-            .padding(.horizontal, 2)
         }
     }
 
@@ -513,6 +561,19 @@ struct ContentView: View {
     private func markerText(for vehicle: VehiclePosition) -> String {
         let route = vehicle.route ?? "--"
         return "\(route) \(vm.directionText(for: vehicle))"
+    }
+
+    private func markerScale(for vehicle: VehiclePosition) -> CGFloat {
+        markerScalePolicy.composedScale(
+            baseScale: markerZoomScale,
+            isSelected: vm.selectedBusID == vehicle.id
+        )
+    }
+
+    private func updateMarkerScale(for distance: CLLocationDistance) {
+        let nextScale = markerScalePolicy.scale(forAltitude: distance)
+        guard markerScalePolicy.shouldApplyScale(current: markerZoomScale, next: nextScale) else { return }
+        markerZoomScale = nextScale
     }
 
     private func formattedLastUpdated(_ date: Date?) -> String {
