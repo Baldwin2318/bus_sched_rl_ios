@@ -207,6 +207,7 @@ private enum MapSheetRoute: Identifiable, Equatable {
     case todaySchedules
     case settings
     case helpTips
+    case about
     case stopArrivals(StopArrivalsPresentation)
     case routeDetail(BusDetailPresentation)
     case busDetail(BusDetailPresentation)
@@ -219,6 +220,8 @@ private enum MapSheetRoute: Identifiable, Equatable {
             return "settings"
         case .helpTips:
             return "helpTips"
+        case .about:
+            return "about"
         case .stopArrivals(let stop):
             return "stopArrivals:\(stop.id)"
         case .routeDetail(let detail):
@@ -389,22 +392,26 @@ struct ContentView: View {
                         .allowsHitTesting(false)
                 }
 
-                VStack(spacing: 10) {
-                    nextArrivalGlanceCard
+                VStack(alignment: .trailing, spacing: 8) {
+                    VStack(spacing: 10) {
+                        nextArrivalGlanceCard
 
-                    HStack(alignment: .center, spacing: 10) {
-                        Spacer()
-                        if shouldShowLocateMeButton {
-                            locateMeButton
-                                .transition(.scale(scale: 0.92).combined(with: .opacity))
+                        HStack(alignment: .center, spacing: 10) {
+                            Spacer()
+                            if shouldShowLocateMeButton {
+                                locateMeButton
+                                    .transition(.scale(scale: 0.92).combined(with: .opacity))
+                            }
+                            liveToggleButton
+                            refreshButton
                         }
-                        liveToggleButton
-                        refreshButton
+                        .animation(.easeInOut(duration: 0.2), value: shouldShowLocateMeButton)
                     }
-                    .animation(.easeInOut(duration: 0.2), value: shouldShowLocateMeButton)
+
+                    mapAttributionWatermark
                 }
                 .padding(.horizontal, 12)
-                .padding(.bottom, 14)
+                .padding(.bottom, 8)
 
                 if isInitialStaticLoadInProgress {
                     firstLaunchLoadingCard
@@ -538,6 +545,9 @@ struct ContentView: View {
                 .presentationDetents([.medium, .large])
         case .helpTips:
             helpTipsSheet
+                .presentationDetents([.medium, .large])
+        case .about:
+            aboutSheet
                 .presentationDetents([.medium, .large])
         case .stopArrivals(let stopArrivals):
             stopArrivalsSheet(for: stopArrivals)
@@ -964,6 +974,14 @@ struct ContentView: View {
                         Label("Help & Tips", systemImage: "questionmark.circle")
                     }
                 }
+
+                Section {
+                    Button {
+                        activeSheet = .about
+                    } label: {
+                        Label("About", systemImage: "info.circle")
+                    }
+                }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -975,6 +993,132 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private var aboutSheet: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("App")
+                            .font(.headline)
+                        aboutMetadataRow(icon: "info.circle", label: "App name", value: appDisplayName)
+                        aboutMetadataRow(icon: "info.circle", label: "Version", value: appVersion)
+                        aboutMetadataRow(icon: "info.circle", label: "Build", value: appBuildNumber)
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Data Sources")
+                            .font(.headline)
+                        aboutBodyRow(
+                            icon: "cylinder.split.1x2",
+                            text: "Transit data provided by the Société de transport de Montréal (STM)"
+                        )
+                        aboutBodyRow(
+                            icon: "cylinder.split.1x2",
+                            text: "Used under Creative Commons Attribution 4.0 (CC-BY) licence"
+                        )
+                        Button {
+                            openSTMDevelopersPage()
+                        } label: {
+                            HStack(alignment: .center, spacing: 10) {
+                                Image(systemName: "cylinder.split.1x2")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 18)
+                                Text("stm.info/en/about/developers")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.blue)
+                                Spacer(minLength: 8)
+                                Image(systemName: "arrow.up.right.square")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Legal")
+                            .font(.headline)
+                        aboutBodyRow(
+                            icon: "doc.plaintext",
+                            text: "Schedule and position data is for informational purposes only."
+                        )
+                        aboutBodyRow(
+                            icon: "doc.plaintext",
+                            text: "This app is not affiliated with or endorsed by the STM."
+                        )
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 20)
+            }
+            .navigationTitle("About")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        activeSheet = nil
+                    }
+                }
+            }
+        }
+    }
+
+    private func aboutMetadataRow(icon: String, label: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: icon)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+            Text(label)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Text(value)
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+        }
+    }
+
+    private func aboutBodyRow(icon: String, text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+            Text(text)
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+        }
+    }
+
+    private var appDisplayName: String {
+        let infoDictionary = Bundle.main.infoDictionary
+        if let displayName = infoDictionary?["CFBundleDisplayName"] as? String, !displayName.isEmpty {
+            return displayName
+        }
+        if let bundleName = infoDictionary?["CFBundleName"] as? String, !bundleName.isEmpty {
+            return bundleName
+        }
+        return "STM Bus Map"
+    }
+
+    private var appVersion: String {
+        let infoDictionary = Bundle.main.infoDictionary
+        return (infoDictionary?["CFBundleShortVersionString"] as? String) ?? "Unknown"
+    }
+
+    private var appBuildNumber: String {
+        let infoDictionary = Bundle.main.infoDictionary
+        return (infoDictionary?["CFBundleVersion"] as? String) ?? "Unknown"
+    }
+
+    private func openSTMDevelopersPage() {
+        guard let url = URL(string: "https://stm.info/en/about/developers") else { return }
+        openURL(url)
     }
 
     private var helpTipsSheet: some View {
@@ -1117,6 +1261,15 @@ struct ContentView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private var mapAttributionWatermark: some View {
+        Text("Data © STM")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .opacity(0.6)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 
     private var locationPermissionBanner: some View {
