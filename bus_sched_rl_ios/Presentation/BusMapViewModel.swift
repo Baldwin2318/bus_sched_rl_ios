@@ -68,6 +68,41 @@ struct BusDetailPresentation: Identifiable, Hashable {
     let rows: [BusDetailStopRow]
 }
 
+enum LiveRefreshTrigger {
+    case initialLoad
+    case polling
+    case manual
+}
+
+struct InterpolationConfig {
+    let durationRatio: Double
+    let manualDuration: Duration
+    let frameInterval: Duration
+    let maxJumpMeters: CLLocationDistance
+
+    static let `default` = InterpolationConfig(
+        durationRatio: 0.85,
+        manualDuration: .seconds(1.6),
+        frameInterval: .milliseconds(100),
+        maxJumpMeters: 1200
+    )
+
+    func duration(forPollInterval pollInterval: Duration, trigger: LiveRefreshTrigger) -> Duration {
+        switch trigger {
+        case .manual:
+            return manualDuration
+        case .initialLoad, .polling:
+            let seconds = max(0.2, pollIntervalTimeInterval(pollInterval) * durationRatio)
+            return .seconds(seconds)
+        }
+    }
+
+    private func pollIntervalTimeInterval(_ duration: Duration) -> TimeInterval {
+        let components = duration.components
+        return TimeInterval(components.seconds) + (Double(components.attoseconds) / 1_000_000_000_000_000_000)
+    }
+}
+
 @MainActor
 final class BusMapViewModel: ObservableObject {
     @Published private(set) var vehicles: [VehiclePosition] = []
@@ -93,6 +128,8 @@ final class BusMapViewModel: ObservableObject {
     private let suggestionEngine = SearchSuggestionEngine()
     private let routeIndex = NearbyRouteIndex()
     private let traceResolver = RouteTraceResolver()
+    private let interpolationEngine = VehicleInterpolationEngine()
+    private let interpolationConfig: InterpolationConfig
 
     private var routeShapes: [String: [String: [CLLocationCoordinate2D]]] = [:]
     private var routeStops: [RouteKey: [BusStop]] = [:]
@@ -105,13 +142,17 @@ final class BusMapViewModel: ObservableObject {
     private var hasLoadedStaticData = false
     private var isSceneActive = true
     private var livePollingTask: Task<Void, Never>?
+    private var interpolationTask: Task<Void, Never>?
     private var staticRefreshTask: Task<Void, Never>?
     private var suggestionTask: Task<Void, Never>?
     private var suggestionToken = 0
+    private var interpolationToken = 0
+    private var interpolatedVehicles: [VehiclePosition] = []
+    private var displayedVehicleIDs: Set<String>?
 
     private let nearbyVehicleDistance: CLLocationDistance = 2500
     private let nearbyRouteDistance: CLLocationDistance = 600
-    private let livePollInterval: Duration = .seconds(20)
+    private let livePollInterval: Duration
 
     var statusMessage: String {
         switch phase {
@@ -128,14 +169,19 @@ final class BusMapViewModel: ObservableObject {
 
     init(
         gtfsRepository: GTFSRepository = LiveGTFSRepository(),
-        realtimeRepository: RealtimeRepository = STMRealtimeRepository()
+        realtimeRepository: RealtimeRepository = STMRealtimeRepository(),
+        livePollInterval: Duration = .seconds(20),
+        interpolationConfig: InterpolationConfig = .default
     ) {
         self.gtfsRepository = gtfsRepository
         self.realtimeRepository = realtimeRepository
+        self.livePollInterval = livePollInterval
+        self.interpolationConfig = interpolationConfig
     }
 
     deinit {
         livePollingTask?.cancel()
+        interpolationTask?.cancel()
         staticRefreshTask?.cancel()
         suggestionTask?.cancel()
     }
@@ -154,7 +200,7 @@ final class BusMapViewModel: ObservableObject {
                 recomputeDisplayedVehicles()
                 scheduleSuggestionRefresh()
                 startLivePollingIfNeeded()
-                refreshLiveBuses()
+                refreshLiveBuses(trigger: .initialLoad)
             } catch {
                 phase = .error("Failed to load routes: \(error.localizedDescription)")
             }
@@ -167,6 +213,7 @@ final class BusMapViewModel: ObservableObject {
             startLivePollingIfNeeded()
         } else {
             stopLivePolling()
+            stopInterpolation()
         }
     }
 
@@ -174,9 +221,10 @@ final class BusMapViewModel: ObservableObject {
         isLiveUpdatesPaused.toggle()
         if isLiveUpdatesPaused {
             stopLivePolling()
+            stopInterpolation()
         } else {
             startLivePollingIfNeeded()
-            refreshLiveBuses()
+            refreshLiveBuses(trigger: .manual)
         }
     }
 
@@ -187,8 +235,12 @@ final class BusMapViewModel: ObservableObject {
     }
 
     func refreshLiveBuses() {
+        refreshLiveBuses(trigger: .manual)
+    }
+
+    func refreshLiveBuses(trigger: LiveRefreshTrigger) {
         Task {
-            await performSingleRefreshIfNeeded()
+            await performSingleRefreshIfNeeded(trigger: trigger)
         }
     }
 
@@ -263,46 +315,134 @@ final class BusMapViewModel: ObservableObject {
         return .warning
     }
 
-    private func performSingleRefreshIfNeeded() async {
+    private func performSingleRefreshIfNeeded(trigger: LiveRefreshTrigger) async {
         guard !isRefreshing else { return }
-        await performSingleRefresh()
+        await performSingleRefresh(trigger: trigger)
     }
 
-    private func performSingleRefresh() async {
-        await MainActor.run {
-            isRefreshing = true
-            withAnimation(.easeOut(duration: 0.16)) {
-                busLayerOpacity = 0.2
-            }
-        }
+    private func performSingleRefresh(trigger: LiveRefreshTrigger) async {
+        await didStartRefresh(trigger: trigger)
 
         do {
             let snapshot = try await realtimeRepository.fetchSnapshot()
-            await MainActor.run {
-                vehicles = snapshot.vehicles
-                var updatesByTripID: [String: TripUpdatePayload] = [:]
-                for update in snapshot.tripUpdates where updatesByTripID[update.tripID] == nil {
-                    updatesByTripID[update.tripID] = update
-                }
-                tripUpdatesByTripID = updatesByTripID
-                lastVehicleRefreshAt = Date()
-                recomputeDisplayedVehicles()
-                scheduleSuggestionRefresh()
-                refreshSelectedBusDetailIfNeeded()
-                phase = .ready
-            }
+            await didReceiveSnapshot(snapshot, trigger: trigger)
         } catch {
             await MainActor.run {
                 phase = .error("Refresh failed: \(error.localizedDescription)")
             }
         }
 
+        await didFinishRefresh(trigger: trigger)
+    }
+
+    private func didStartRefresh(trigger: LiveRefreshTrigger) async {
         await MainActor.run {
-            withAnimation(.easeIn(duration: 0.24)) {
-                busLayerOpacity = 1
+            isRefreshing = true
+            if trigger == .manual {
+                withAnimation(.easeOut(duration: 0.16)) {
+                    busLayerOpacity = 0.2
+                }
+            }
+        }
+    }
+
+    private func didReceiveSnapshot(_ snapshot: RealtimeSnapshot, trigger: LiveRefreshTrigger) async {
+        await MainActor.run {
+            vehicles = snapshot.vehicles
+            var updatesByTripID: [String: TripUpdatePayload] = [:]
+            for update in snapshot.tripUpdates where updatesByTripID[update.tripID] == nil {
+                updatesByTripID[update.tripID] = update
+            }
+            tripUpdatesByTripID = updatesByTripID
+            lastVehicleRefreshAt = Date()
+            updateDisplayedVehicleSelection(using: snapshot.vehicles)
+            applyDisplayedVehiclesFrame(interpolatedVehicles.isEmpty ? snapshot.vehicles : interpolatedVehicles)
+            scheduleSuggestionRefresh()
+            refreshSelectedBusDetailIfNeeded()
+            phase = .ready
+        }
+
+        await beginInterpolation(to: snapshot.vehicles, trigger: trigger)
+    }
+
+    private func didFinishRefresh(trigger: LiveRefreshTrigger) async {
+        await MainActor.run {
+            if trigger == .manual {
+                withAnimation(.easeIn(duration: 0.24)) {
+                    busLayerOpacity = 1
+                }
             }
             isRefreshing = false
         }
+    }
+
+    private func beginInterpolation(to targetVehicles: [VehiclePosition], trigger: LiveRefreshTrigger) async {
+        stopInterpolation()
+        let token = interpolationToken
+
+        if interpolatedVehicles.isEmpty {
+            await interpolationEngine.setInitial(targetVehicles)
+            interpolatedVehicles = targetVehicles
+            applyDisplayedVehiclesFrame(targetVehicles)
+            return
+        }
+
+        await interpolationEngine.beginTransition(
+            to: targetVehicles,
+            maxJumpMeters: interpolationConfig.maxJumpMeters
+        )
+
+        let duration = interpolationConfig.duration(forPollInterval: livePollInterval, trigger: trigger)
+        let totalSeconds = durationToTimeInterval(duration)
+        guard totalSeconds > 0 else {
+            let frame = await interpolationEngine.frame(fraction: 1)
+            interpolatedVehicles = frame
+            applyDisplayedVehiclesFrame(frame)
+            return
+        }
+
+        interpolationTask = Task { [weak self] in
+            guard let self else { return }
+            let startedAt = Date()
+
+            while !Task.isCancelled {
+                let elapsed = Date().timeIntervalSince(startedAt)
+                let progress = min(max(elapsed / totalSeconds, 0), 1)
+                let frame = await self.interpolationEngine.frame(fraction: progress)
+
+                await MainActor.run {
+                    guard self.interpolationToken == token else { return }
+                    self.interpolatedVehicles = frame
+                    self.applyDisplayedVehiclesFrame(frame)
+                }
+
+                if progress >= 1 {
+                    break
+                }
+
+                do {
+                    try await Task.sleep(for: self.interpolationConfig.frameInterval)
+                } catch {
+                    break
+                }
+            }
+
+            await MainActor.run {
+                guard self.interpolationToken == token else { return }
+                self.interpolationTask = nil
+            }
+        }
+    }
+
+    private func stopInterpolation() {
+        interpolationToken += 1
+        interpolationTask?.cancel()
+        interpolationTask = nil
+    }
+
+    private func durationToTimeInterval(_ duration: Duration) -> TimeInterval {
+        let components = duration.components
+        return TimeInterval(components.seconds) + (Double(components.attoseconds) / 1_000_000_000_000_000_000)
     }
 
     private func startLivePollingIfNeeded() {
@@ -314,7 +454,7 @@ final class BusMapViewModel: ObservableObject {
         livePollingTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
-                await self.performSingleRefreshIfNeeded()
+                await self.performSingleRefreshIfNeeded(trigger: .polling)
                 do {
                     try await Task.sleep(for: self.livePollInterval)
                 } catch {
@@ -376,18 +516,32 @@ final class BusMapViewModel: ObservableObject {
     }
 
     private func recomputeDisplayedVehicles() {
+        let sourceVehicles = interpolatedVehicles.isEmpty ? vehicles : interpolatedVehicles
+        updateDisplayedVehicleSelection(using: sourceVehicles)
+        applyDisplayedVehiclesFrame(sourceVehicles)
+    }
+
+    private func updateDisplayedVehicleSelection(using sourceVehicles: [VehiclePosition]) {
         guard let userLocation else {
-            displayedVehicles = vehicles
+            displayedVehicleIDs = nil
             return
         }
 
         let userPoint = CLLocation(latitude: userLocation.latitude, longitude: userLocation.longitude)
-        let nearby = vehicles.filter { vehicle in
+        let nearby = sourceVehicles.filter { vehicle in
             let busPoint = CLLocation(latitude: vehicle.coord.latitude, longitude: vehicle.coord.longitude)
             return userPoint.distance(from: busPoint) <= nearbyVehicleDistance
         }
 
-        displayedVehicles = nearby.isEmpty ? vehicles : nearby
+        displayedVehicleIDs = nearby.isEmpty ? nil : Set(nearby.map(\.id))
+    }
+
+    private func applyDisplayedVehiclesFrame(_ frameVehicles: [VehiclePosition]) {
+        guard let displayedVehicleIDs else {
+            displayedVehicles = frameVehicles
+            return
+        }
+        displayedVehicles = frameVehicles.filter { displayedVehicleIDs.contains($0.id) }
     }
 
     private func scheduleSuggestionRefresh() {
