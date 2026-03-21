@@ -91,7 +91,6 @@ struct ContentView: View {
             }
             .navigationTitle("STM Bus Map")
             .navigationBarTitleDisplayMode(.inline)
-            .searchable(text: $vm.searchText, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search route (e.g. 165 Nord)")
             .safeAreaInset(edge: .top) {
                 HStack {
                     statusPill
@@ -115,16 +114,6 @@ struct ContentView: View {
                     )
                 )
             }
-        }
-        .onChange(of: vm.displayedVehicles) { vehicles in
-            let query = vm.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !query.isEmpty, let first = vehicles.first else { return }
-            mapCamera = .region(
-                MKCoordinateRegion(
-                    center: first.coord,
-                    span: MKCoordinateSpan(latitudeDelta: 0.015, longitudeDelta: 0.015)
-                )
-            )
         }
         .onReceive(traceTimer) { _ in
             guard !vm.selectedRouteShape.isEmpty else { return }

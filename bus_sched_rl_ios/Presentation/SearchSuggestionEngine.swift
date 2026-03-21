@@ -5,34 +5,20 @@ actor SearchSuggestionEngine {
     private let busSpeedMetersPerSecond = 8.0
 
     func buildSuggestions(
-        query: String,
         vehicles: [VehiclePosition],
         nearbyRoutes: Set<RouteKey>,
         allRoutes: [String],
-        routePrefixIndex: [String: [String]],
         routeStops: [RouteKey: [BusStop]],
         routeDirectionLabels: [RouteKey: String],
         userLocation: CLLocationCoordinate2D?
     ) -> [BusSuggestion] {
-        if query.isEmpty {
-            return nearbySuggestions(
-                vehicles: vehicles,
-                nearbyRoutes: nearbyRoutes,
-                routeStops: routeStops,
-                routeDirectionLabels: routeDirectionLabels,
-                userLocation: userLocation,
-                allRoutes: allRoutes
-            )
-        }
-
-        return querySuggestions(
-            query: query,
+        nearbySuggestions(
             vehicles: vehicles,
-            allRoutes: allRoutes,
-            routePrefixIndex: routePrefixIndex,
+            nearbyRoutes: nearbyRoutes,
             routeStops: routeStops,
             routeDirectionLabels: routeDirectionLabels,
-            userLocation: userLocation
+            userLocation: userLocation,
+            allRoutes: allRoutes,
         )
     }
 
@@ -123,86 +109,6 @@ actor SearchSuggestionEngine {
         }
 
         return Array(sorted.prefix(24))
-    }
-
-    private func querySuggestions(
-        query: String,
-        vehicles: [VehiclePosition],
-        allRoutes: [String],
-        routePrefixIndex: [String: [String]],
-        routeStops: [RouteKey: [BusStop]],
-        routeDirectionLabels: [RouteKey: String],
-        userLocation: CLLocationCoordinate2D?
-    ) -> [BusSuggestion] {
-        let normalizedQuery = query.uppercased()
-        let routeCandidates = routePrefixIndex[normalizedQuery] ?? allRoutes.filter { $0.localizedCaseInsensitiveContains(query) }
-
-        var results: [BusSuggestion] = []
-        var seen: Set<String> = []
-
-        for route in routeCandidates {
-            let matchingVehicles = vehicles.filter { $0.route == route }
-
-            if matchingVehicles.isEmpty {
-                let routeKeys = routeStops.keys.filter { $0.route == route }
-                for key in routeKeys {
-                    let id = "query-\(key.route)-\(key.direction)"
-                    guard seen.insert(id).inserted else { continue }
-                    let metrics = stopMetrics(for: key, userLocation: userLocation, vehicles: [], routeStops: routeStops)
-                    results.append(
-                            BusSuggestion(
-                                id: id,
-                                route: route,
-                                displayDirection: routeDirectionLabels[key] ?? fallbackDirectionText(key.direction),
-                                directionID: key.direction,
-                                metersAway: metrics?.meters,
-                                etaMinutes: metrics?.eta,
-                            nearestStopName: metrics?.stopName
-                        )
-                    )
-                    if results.count >= 24 { return results }
-                }
-                if routeKeys.isEmpty {
-                    let id = "query-route-\(route)"
-                    guard seen.insert(id).inserted else { continue }
-                    results.append(
-                        BusSuggestion(
-                            id: id,
-                            route: route,
-                            displayDirection: "Route",
-                            directionID: nil,
-                            metersAway: nil,
-                            etaMinutes: nil,
-                            nearestStopName: nil
-                        )
-                    )
-                }
-            } else {
-                let grouped = Dictionary(grouping: matchingVehicles) { vehicle in
-                    vehicle.direction.map(String.init) ?? "0"
-                }
-                for (direction, groupedVehicles) in grouped {
-                    let key = RouteKey(route: route, direction: direction)
-                    let id = "query-live-\(route)-\(direction)"
-                    guard seen.insert(id).inserted else { continue }
-                    let metrics = stopMetrics(for: key, userLocation: userLocation, vehicles: groupedVehicles, routeStops: routeStops)
-                    results.append(
-                            BusSuggestion(
-                                id: id,
-                                route: route,
-                                displayDirection: routeDirectionLabels[key] ?? displayDirection(routeVehicles: groupedVehicles, fallbackDirectionID: direction),
-                                directionID: direction,
-                                metersAway: metrics?.meters,
-                                etaMinutes: metrics?.eta,
-                            nearestStopName: metrics?.stopName
-                        )
-                    )
-                    if results.count >= 24 { return results }
-                }
-            }
-        }
-
-        return results
     }
 
     private func stopMetrics(

@@ -34,7 +34,6 @@ struct BusSuggestion: Identifiable, Hashable {
 final class BusMapViewModel: ObservableObject {
     @Published private(set) var vehicles: [VehiclePosition] = []
     @Published private(set) var displayedVehicles: [VehiclePosition] = []
-    @Published private(set) var searchSuggestions: [BusSuggestion] = []
     @Published private(set) var nearbyScheduleSuggestions: [BusSuggestion] = []
     @Published private(set) var selectedRouteShape: [CLLocationCoordinate2D] = []
     @Published private(set) var selectedBusID: String?
@@ -43,14 +42,6 @@ final class BusMapViewModel: ObservableObject {
     @Published private(set) var isRefreshing = false
     @Published private(set) var busLayerOpacity = 1.0
     @Published private(set) var lastTraceSource: String = "none"
-    @Published var searchText: String = "" {
-        didSet {
-            selectedBusID = nil
-            selectedRouteShape = []
-            recomputeDisplayedVehicles()
-            scheduleSuggestionRefresh()
-        }
-    }
 
     private let gtfsRepository: GTFSRepository
     private let realtimeRepository: RealtimeRepository
@@ -63,7 +54,6 @@ final class BusMapViewModel: ObservableObject {
     private var shapeCoordinatesByID: [String: [CLLocationCoordinate2D]] = [:]
     private var routeShapeIDsByKey: [RouteKey: [String]] = [:]
     private var routeDirectionLabels: [RouteKey: String] = [:]
-    private var routePrefixIndex: [String: [String]] = [:]
     private var userLocation: CLLocationCoordinate2D?
     private var hasLoadedStaticData = false
     private var refreshTask: Task<Void, Never>?
@@ -112,7 +102,6 @@ final class BusMapViewModel: ObservableObject {
                 routeShapeIDsByKey = staticData.routeShapeIDsByKey
                 routeDirectionLabels = staticData.routeDirectionLabels
                 availableRoutes = staticData.availableRoutes
-                routePrefixIndex = Self.makePrefixIndex(routes: staticData.availableRoutes)
                 hasLoadedStaticData = true
                 await routeIndex.rebuild(from: staticData.routeShapes)
                 phase = .ready
@@ -155,7 +144,7 @@ final class BusMapViewModel: ObservableObject {
     }
 
     func applySuggestion(_ suggestion: BusSuggestion) {
-        searchText = suggestion.route
+        selectedBusID = nil
         if let direction = suggestion.directionID {
             selectedRouteShape = routeShapes[suggestion.route]?[direction] ?? []
         } else {
@@ -204,13 +193,6 @@ final class BusMapViewModel: ObservableObject {
     }
 
     private func recomputeDisplayedVehicles() {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if !query.isEmpty {
-            displayedVehicles = vehicles.filter { ($0.route ?? "").localizedCaseInsensitiveContains(query) }
-            return
-        }
-
         guard let userLocation else {
             displayedVehicles = vehicles
             return
@@ -230,10 +212,8 @@ final class BusMapViewModel: ObservableObject {
         suggestionToken += 1
         let currentToken = suggestionToken
 
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         let vehiclesSnapshot = vehicles
         let routeSnapshot = availableRoutes
-        let routePrefixSnapshot = routePrefixIndex
         let routeStopsSnapshot = routeStops
         let routeDirectionLabelsSnapshot = routeDirectionLabels
         let locationSnapshot = userLocation
@@ -244,22 +224,10 @@ final class BusMapViewModel: ObservableObject {
             if Task.isCancelled { return }
 
             let nearbyRouteKeys = await routeIndex.routeKeys(near: locationSnapshot, maxDistance: nearbyDistance)
-            let suggestions = await suggestionEngine.buildSuggestions(
-                query: query,
-                vehicles: vehiclesSnapshot,
-                nearbyRoutes: nearbyRouteKeys,
-                allRoutes: routeSnapshot,
-                routePrefixIndex: routePrefixSnapshot,
-                routeStops: routeStopsSnapshot,
-                routeDirectionLabels: routeDirectionLabelsSnapshot,
-                userLocation: locationSnapshot
-            )
             let nearbySuggestions = await suggestionEngine.buildSuggestions(
-                query: "",
                 vehicles: vehiclesSnapshot,
                 nearbyRoutes: nearbyRouteKeys,
                 allRoutes: routeSnapshot,
-                routePrefixIndex: routePrefixSnapshot,
                 routeStops: routeStopsSnapshot,
                 routeDirectionLabels: routeDirectionLabelsSnapshot,
                 userLocation: locationSnapshot
@@ -268,7 +236,6 @@ final class BusMapViewModel: ObservableObject {
             if Task.isCancelled { return }
             await MainActor.run {
                 guard self.suggestionToken == currentToken else { return }
-                self.searchSuggestions = suggestions
                 self.nearbyScheduleSuggestions = nearbySuggestions
             }
         }
@@ -285,19 +252,5 @@ final class BusMapViewModel: ObservableObject {
         default:
             return "Nord"
         }
-    }
-
-    private static func makePrefixIndex(routes: [String]) -> [String: [String]] {
-        var index: [String: [String]] = [:]
-        for route in routes {
-            let normalized = route.uppercased()
-            guard !normalized.isEmpty else { continue }
-            var prefix = ""
-            for char in normalized {
-                prefix.append(char)
-                index[prefix, default: []].append(route)
-            }
-        }
-        return index
     }
 }
