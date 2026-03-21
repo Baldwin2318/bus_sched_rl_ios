@@ -233,6 +233,14 @@ private enum MapSheetRoute: Identifiable, Equatable {
     }
 }
 
+private enum ArrivalsSheetState {
+    case loading
+    case error(String)
+    case noMoreToday
+    case empty
+    case content([BusSuggestion])
+}
+
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
 
@@ -247,6 +255,7 @@ struct ContentView: View {
     @State private var mapCenterCoordinate: CLLocationCoordinate2D?
     @State private var mapCameraDistance: CLLocationDistance = 0
     @State private var freshnessReferenceDate = Date()
+    @State private var showArrivalsHelp = false
 
     private let markerScalePolicy = MarkerScalePolicy.default
     private let stopMarkerMaxVisibleDistance: CLLocationDistance = 5_500
@@ -638,55 +647,133 @@ struct ContentView: View {
         NavigationStack {
             List {
                 Section {
-                    Text("Schedules for \(Date.now.formatted(date: .abbreviated, time: .omitted))")
-                        .font(.subheadline)
-                    Text("Times are estimated from nearby live buses and nearest stops.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    HStack(alignment: .center, spacing: 10) {
+                        Text("Nearby Arrivals")
+                            .font(.headline.weight(.semibold))
+
+                        Spacer()
+
+                        Text(arrivalsUpdatedText())
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+
+                        Button {
+                            vm.refreshLiveBuses()
+                            vm.refreshSuggestionsForCurrentState()
+                        } label: {
+                            if vm.isRefreshing {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.subheadline.weight(.semibold))
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(vm.isRefreshing)
+                        .accessibilityLabel("Refresh nearby arrivals")
+                    }
                 }
 
-                if vm.nearbyScheduleSuggestions.isEmpty {
-                    Section {
-                        Text("No nearby bus schedules available yet.")
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    Section("Nearby Buses") {
-                        ForEach(vm.nearbyScheduleSuggestions) { suggestion in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(suggestion.title)
-                                    .font(.headline)
-                                Text(scheduleDetail(for: suggestion))
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                                if let etaMinutes = suggestion.etaMinutes {
-                                    Text("Estimated arrival: \(clockTime(afterMinutes: etaMinutes))")
-                                        .font(.caption.weight(.semibold))
-                                }
-                            }
-                            .padding(.vertical, 2)
-                        }
+                if let nextDeparture = nextDepartureSuggestion {
+                    Section("Next Departure") {
+                        nextDepartureCard(for: nextDeparture)
                     }
                 }
+
+                switch arrivalsSheetState {
+                case .content(let suggestions):
+                    if !suggestions.isEmpty {
+                        Section("Nearby Buses") {
+                            ForEach(suggestions) { suggestion in
+                                arrivalRow(for: suggestion)
+                                    .padding(.vertical, 3)
+                            }
+                        }
+                    }
+                case .loading:
+                    Section {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ProgressView()
+                            Text("Loading nearby arrivals...")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 6)
+                    }
+                case .error(let message):
+                    Section {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("Live arrival feed unavailable", systemImage: "exclamationmark.triangle.fill")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.orange)
+                            Text(message)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                            Button("Retry") {
+                                vm.refreshLiveBuses()
+                                vm.refreshSuggestionsForCurrentState()
+                            }
+                            .font(.subheadline.weight(.semibold))
+                        }
+                        .padding(.vertical, 6)
+                    }
+                case .noMoreToday:
+                    Section {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("No more nearby departures today.")
+                                .font(.subheadline.weight(.semibold))
+                            Text("Try another stop, or check again later.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                            Button("Retry") {
+                                vm.refreshLiveBuses()
+                                vm.refreshSuggestionsForCurrentState()
+                            }
+                            .font(.subheadline.weight(.semibold))
+                        }
+                        .padding(.vertical, 6)
+                    }
+                case .empty:
+                    Section {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("No nearby arrivals right now.")
+                                .font(.subheadline.weight(.semibold))
+                            Text("Service may be limited at this time. Try refreshing or checking another stop.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                            Button("Retry") {
+                                vm.refreshLiveBuses()
+                                vm.refreshSuggestionsForCurrentState()
+                            }
+                            .font(.subheadline.weight(.semibold))
+                        }
+                        .padding(.vertical, 6)
+                    }
+                }
+
+                Section("Help") {
+                    Text("Nearby Arrivals uses live vehicle updates when available and falls back to scheduled context when live data is limited.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
-            .navigationTitle("Today's Schedules")
+            .navigationTitle("Nearby Arrivals")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        vm.refreshLiveBuses()
-                        vm.refreshSuggestionsForCurrentState()
+                        showArrivalsHelp = true
                     } label: {
-                        if vm.isRefreshing {
-                            ProgressView()
-                                .controlSize(.small)
-                        } else {
-                            Image(systemName: "arrow.clockwise")
-                        }
+                        Image(systemName: "questionmark.circle")
                     }
-                    .disabled(vm.isRefreshing)
-                    .accessibilityLabel("Refresh schedules")
+                    .accessibilityLabel("Arrivals help")
                 }
+            }
+            .alert("How Nearby Arrivals Works", isPresented: $showArrivalsHelp) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("This view prioritizes live ETAs when available. If live data is limited, rows are shown with scheduled context.")
             }
         }
     }
@@ -787,19 +874,144 @@ struct ContentView: View {
         }
     }
 
-    private func scheduleDetail(for suggestion: BusSuggestion) -> String {
-        var chunks: [String] = []
-        if let stop = suggestion.nearestStopName, !stop.isEmpty {
-            chunks.append("Stop: \(stop)")
+    private var sortedUpcomingSuggestions: [BusSuggestion] {
+        let now = Date()
+        return vm.nearbyScheduleSuggestions
+            .filter { suggestion in
+                guard let arrivalAt = suggestion.estimatedArrivalAt else { return true }
+                return arrivalAt >= now
+            }
+    }
+
+    private var nextDepartureSuggestion: BusSuggestion? {
+        sortedUpcomingSuggestions.first(where: { $0.etaMinutes != nil }) ?? sortedUpcomingSuggestions.first
+    }
+
+    private var remainingDepartureSuggestions: [BusSuggestion] {
+        guard let nextDepartureSuggestion else { return [] }
+        return sortedUpcomingSuggestions.filter { $0.id != nextDepartureSuggestion.id }
+    }
+
+    private var arrivalsSheetState: ArrivalsSheetState {
+        if case .error(let message) = vm.phase {
+            return .error(message)
         }
-        if let meters = suggestion.metersAway {
-            let kmAway = Double(meters) / 1000
-            chunks.append(String(format: "%.2f km away", kmAway))
+        if vm.isRefreshing && vm.nearbyScheduleSuggestions.isEmpty {
+            return .loading
         }
+
+        let now = Date()
+        let timedSuggestions = vm.nearbyScheduleSuggestions.filter { $0.estimatedArrivalAt != nil }
+        if !timedSuggestions.isEmpty &&
+            timedSuggestions.filter({ ($0.estimatedArrivalAt ?? .distantFuture) >= now }).isEmpty {
+            return .noMoreToday
+        }
+
+        if sortedUpcomingSuggestions.isEmpty {
+            return .empty
+        }
+        return .content(remainingDepartureSuggestions)
+    }
+
+    private func arrivalsUpdatedText() -> String {
+        if vm.isRefreshing {
+            return "Updating..."
+        }
+        guard let last = vm.lastVehicleRefreshAt else {
+            return "Waiting for live feed"
+        }
+        let seconds = max(0, Int(Date().timeIntervalSince(last)))
+        return "Updated \(seconds)s ago"
+    }
+
+    private func nextDepartureCard(for suggestion: BusSuggestion) -> some View {
+        HStack(alignment: .center, spacing: 14) {
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .fill(routeColor(for: suggestion.route))
+                .frame(width: 7, height: 44)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("\(suggestion.route) \(suggestion.displayDirection)")
+                    .font(.headline.weight(.semibold))
+                if let stop = suggestion.nearestStopName, !stop.isEmpty {
+                    Text(stop)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                arrivalSourceBadge(suggestion.source)
+            }
+
+            Spacer(minLength: 10)
+
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(primaryEtaText(for: suggestion))
+                    .font(.system(size: 30, weight: .heavy, design: .rounded))
+                    .monospacedDigit()
+                Text(arrivalClockText(for: suggestion))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 6)
+    }
+
+    private func arrivalRow(for suggestion: BusSuggestion) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                .fill(routeColor(for: suggestion.route))
+                .frame(width: 6, height: 36)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(suggestion.route) \(suggestion.displayDirection)")
+                    .font(.subheadline.weight(.semibold))
+                if let stop = suggestion.nearestStopName, !stop.isEmpty {
+                    Text(stop)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                arrivalSourceBadge(suggestion.source)
+            }
+
+            Spacer(minLength: 8)
+
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(primaryEtaText(for: suggestion))
+                    .font(.title3.weight(.heavy))
+                    .monospacedDigit()
+                Text(arrivalClockText(for: suggestion))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 4)
+        .frame(minHeight: 52)
+        .listRowBackground(isImminentArrival(suggestion) ? Color.orange.opacity(0.14) : Color.clear)
+    }
+
+    private func primaryEtaText(for suggestion: BusSuggestion) -> String {
         if let eta = suggestion.etaMinutes {
-            chunks.append("ETA \(eta) min")
+            return "\(eta)m"
         }
-        return chunks.joined(separator: " • ")
+        return "--"
+    }
+
+    private func arrivalClockText(for suggestion: BusSuggestion) -> String {
+        guard let date = suggestion.estimatedArrivalAt else { return "Time unavailable" }
+        return date.formatted(date: .omitted, time: .shortened)
+    }
+
+    private func isImminentArrival(_ suggestion: BusSuggestion) -> Bool {
+        guard let eta = suggestion.etaMinutes else { return false }
+        return eta <= 5
+    }
+
+    private func arrivalSourceBadge(_ source: StopTimeSourceLabel) -> some View {
+        Text(source.rawValue)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(sourceColor(source))
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(sourceColor(source).opacity(0.15), in: Capsule())
     }
 
     private func liveStatusText(at now: Date) -> String {
@@ -825,11 +1037,6 @@ struct ContentView: View {
             return "No time available"
         }
         return chunks.joined(separator: " • ")
-    }
-
-    private func clockTime(afterMinutes minutes: Int) -> String {
-        let date = Calendar.current.date(byAdding: .minute, value: minutes, to: Date()) ?? Date()
-        return date.formatted(date: .omitted, time: .shortened)
     }
 
     private func markerText(for vehicle: VehiclePosition) -> String {

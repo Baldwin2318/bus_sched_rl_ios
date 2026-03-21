@@ -9,6 +9,8 @@ struct BusSuggestion: Identifiable, Hashable {
     let directionID: String?
     let metersAway: Int?
     let etaMinutes: Int?
+    let estimatedArrivalAt: Date?
+    let source: StopTimeSourceLabel
     let nearestStopName: String?
 
     var title: String {
@@ -17,9 +19,6 @@ struct BusSuggestion: Identifiable, Hashable {
 
     var subtitle: String {
         var chunks: [String] = []
-        if let metersAway {
-            chunks.append("\(metersAway)m away")
-        }
         if let etaMinutes {
             chunks.append("ETA \(etaMinutes) min")
         }

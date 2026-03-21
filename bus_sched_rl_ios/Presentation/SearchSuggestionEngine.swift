@@ -30,6 +30,7 @@ actor SearchSuggestionEngine {
         userLocation: CLLocationCoordinate2D?,
         allRoutes: [String]
     ) -> [BusSuggestion] {
+        let now = Date()
         guard let userLocation else {
             return allRoutes.prefix(12).map {
                 BusSuggestion(
@@ -39,6 +40,8 @@ actor SearchSuggestionEngine {
                     directionID: nil,
                     metersAway: nil,
                     etaMinutes: nil,
+                    estimatedArrivalAt: nil,
+                    source: .scheduled,
                     nearestStopName: nil
                 )
             }
@@ -70,7 +73,11 @@ actor SearchSuggestionEngine {
                         directionID: key.direction,
                         metersAway: metrics?.meters,
                         etaMinutes: metrics?.eta,
-                    nearestStopName: metrics?.stopName
+                        estimatedArrivalAt: metrics?.eta.flatMap { eta in
+                            Calendar.current.date(byAdding: .minute, value: eta, to: now)
+                        },
+                        source: metrics?.eta != nil ? .live : .scheduled,
+                        nearestStopName: metrics?.stopName
                 )
             )
         }
@@ -88,12 +95,27 @@ actor SearchSuggestionEngine {
                         directionID: key.direction,
                         metersAway: metrics?.meters,
                         etaMinutes: metrics?.eta,
-                    nearestStopName: metrics?.stopName
+                        estimatedArrivalAt: metrics?.eta.flatMap { eta in
+                            Calendar.current.date(byAdding: .minute, value: eta, to: now)
+                        },
+                        source: metrics?.eta != nil ? .live : .scheduled,
+                        nearestStopName: metrics?.stopName
                 )
             )
         }
 
         let sorted = results.sorted { lhs, rhs in
+            switch (lhs.etaMinutes, rhs.etaMinutes) {
+            case let (l?, r?):
+                if l != r { return l < r }
+            case (.some, .none):
+                return true
+            case (.none, .some):
+                return false
+            case (.none, .none):
+                break
+            }
+
             switch (lhs.metersAway, rhs.metersAway) {
             case let (l?, r?):
                 if l != r { return l < r }
