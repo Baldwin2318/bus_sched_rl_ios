@@ -206,6 +206,7 @@ private enum ContrastAccessibility {
 private enum MapSheetRoute: Identifiable, Equatable {
     case todaySchedules
     case settings
+    case helpTips
     case stopArrivals(StopArrivalsPresentation)
     case routeDetail(BusDetailPresentation)
     case busDetail(BusDetailPresentation)
@@ -216,6 +217,8 @@ private enum MapSheetRoute: Identifiable, Equatable {
             return "todaySchedules"
         case .settings:
             return "settings"
+        case .helpTips:
+            return "helpTips"
         case .stopArrivals(let stop):
             return "stopArrivals:\(stop.id)"
         case .routeDetail(let detail):
@@ -241,11 +244,45 @@ private enum ArrivalsSheetState {
     case content([BusSuggestion])
 }
 
+private enum CoachMarkKind: String {
+    case tapBus
+    case zoomStops
+    case pauseLive
+    case nearbyArrivals
+
+    var text: String {
+        switch self {
+        case .tapBus:
+            return "Tap a bus to see its route and stops"
+        case .zoomStops:
+            return "Zoom in to explore individual stops"
+        case .pauseLive:
+            return "Pause live tracking to save battery"
+        case .nearbyArrivals:
+            return "See nearby arrivals for this route"
+        }
+    }
+}
+
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openURL) private var openURL
 
     @StateObject private var vm = BusMapViewModel()
     @StateObject private var locationService = LocationService()
+
+    @AppStorage("onboarding.locationPriming.completed") private var hasCompletedLocationPriming = false
+    @AppStorage("onboarding.locationPermissionRequested") private var hasRequestedLocationPermission = false
+    @AppStorage("coach.tapBus.shown") private var hasShownCoachTapBus = false
+    @AppStorage("coach.zoomStops.shown") private var hasShownCoachZoomStops = false
+    @AppStorage("coach.pauseLive.shown") private var hasShownCoachPauseLive = false
+    @AppStorage("coach.nearbyArrivals.shown") private var hasShownCoachNearbyArrivals = false
+    @AppStorage("state.selectedRouteID") private var persistedSelectedRouteID = ""
+    @AppStorage("state.selectedRouteDirectionID") private var persistedSelectedRouteDirectionID = ""
+    @AppStorage("state.map.center.latitude") private var persistedMapCenterLatitude = 0.0
+    @AppStorage("state.map.center.longitude") private var persistedMapCenterLongitude = 0.0
+    @AppStorage("state.map.camera.distance") private var persistedMapCameraDistance = 0.0
+    @AppStorage("state.map.camera.isStored") private var hasPersistedMapCamera = false
 
     @State private var mapCamera = MapCameraPosition.automatic
     @State private var didCenterToUser = false
@@ -256,12 +293,20 @@ struct ContentView: View {
     @State private var mapCameraDistance: CLLocationDistance = 0
     @State private var freshnessReferenceDate = Date()
     @State private var showArrivalsHelp = false
+    @State private var showLocationPriming = false
+    @State private var activeCoachMark: CoachMarkKind?
+    @State private var liveRefreshSuccessCount = 0
+    @State private var hasRestoredRouteSelection = false
+    @State private var lastMapPersistAt = Date.distantPast
 
     private let markerScalePolicy = MarkerScalePolicy.default
     private let stopMarkerMaxVisibleDistance: CLLocationDistance = 5_500
     private let stopMarkerRadiusMeters: CLLocationDistance = 2_200
     private let stopMarkerMaxCount = 80
     private let recenterVisibilityThresholdMeters: CLLocationDistance = 75
+    private let mapPersistInterval: TimeInterval = 0.85
+    private let mapPersistDistanceThreshold: CLLocationDistance = 25
+    private let mapPersistZoomThreshold: CLLocationDistance = 40
     private let traceTimer = Timer.publish(every: 0.45, on: .main, in: .common).autoconnect()
     private let freshnessTimer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
 
@@ -294,7 +339,10 @@ struct ContentView: View {
 
                     ForEach(visibleStopAnnotations) { stop in
                         Annotation(stop.name, coordinate: stop.coord) {
-                            StopMarkerView(name: stop.name) {
+                            StopMarkerView(
+                                name: stop.name,
+                                isHighlighted: activeCoachMark == .zoomStops && stop.id == highlightedStopID
+                            ) {
                                 if let arrivals = vm.stopArrivals(for: stop.id) {
                                     activeSheet = .stopArrivals(arrivals)
                                 }
@@ -314,9 +362,10 @@ struct ContentView: View {
                                 labelBackgroundColor: markerLabelBackgroundColor(for: vehicle),
                                 opacity: vm.busLayerOpacity * markerOpacityMultiplier(for: vehicle),
                                 scale: markerScale(for: vehicle),
-                                scaleAnimationDuration: markerScalePolicy.animationDuration
+                                scaleAnimationDuration: markerScalePolicy.animationDuration,
+                                isHighlighted: activeCoachMark == .tapBus && vehicle.id == highlightedVehicleID
                             ) {
-                                vm.selectBus(vehicle)
+                                handleBusTap(vehicle)
                             }
                         }
                     }
@@ -326,8 +375,19 @@ struct ContentView: View {
                     mapCenterCoordinate = context.camera.centerCoordinate
                     mapCameraDistance = context.camera.distance
                     updateMarkerScale(for: context.camera.distance)
+                    persistMapCameraIfNeeded(
+                        center: context.camera.centerCoordinate,
+                        distance: context.camera.distance
+                    )
+                    maybeShowCoachMarkZoomStops()
                 }
                 .ignoresSafeArea()
+
+                if isInitialStaticLoadInProgress {
+                    Color.black.opacity(0.16)
+                        .ignoresSafeArea()
+                        .allowsHitTesting(false)
+                }
 
                 VStack(spacing: 10) {
                     nextArrivalGlanceCard
@@ -338,12 +398,28 @@ struct ContentView: View {
                             locateMeButton
                                 .transition(.scale(scale: 0.92).combined(with: .opacity))
                         }
+                        liveToggleButton
                         refreshButton
                     }
                     .animation(.easeInOut(duration: 0.2), value: shouldShowLocateMeButton)
                 }
                 .padding(.horizontal, 12)
                 .padding(.bottom, 14)
+
+                if isInitialStaticLoadInProgress {
+                    firstLaunchLoadingCard
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 18)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+
+                if let coachMark = activeCoachMark {
+                    coachMarkOverlay(for: coachMark)
+                }
+
+                if showLocationPriming {
+                    locationPrimingOverlay
+                }
             }
             .navigationTitle("STM Bus Map")
             .navigationBarTitleDisplayMode(.inline)
@@ -358,21 +434,36 @@ struct ContentView: View {
                 }
             }
             .safeAreaInset(edge: .top) {
-                HStack(spacing: 8) {
-                    statusPill
-                    Spacer()
-                    liveStatusPill
+                VStack(spacing: 8) {
+                    HStack(spacing: 8) {
+                        statusPill
+                        Spacer()
+                        liveStatusPill
+                    }
+
+                    if shouldShowLocationPermissionBanner {
+                        locationPermissionBanner
+                    }
+
+                    if let liveFeedStatusMessage = vm.liveFeedStatusMessage {
+                        subtleStatusBanner(text: liveFeedStatusMessage)
+                    }
                 }
                 .padding(.horizontal, 12)
             }
         }
         .task {
+            restoreMapCameraIfNeeded()
             vm.loadIfNeeded()
             vm.setScenePhase(scenePhase)
-            locationService.requestAccessAndStart()
+            handleLocationStartup()
         }
         .onChange(of: scenePhase) { _, newPhase in
             vm.setScenePhase(newPhase)
+        }
+        .onChange(of: locationService.authorizationState) { _, newState in
+            handleLocationAuthorizationChange(newState)
+            maybeShowCoachMarkTapBus()
         }
         .onReceive(locationService.$location.compactMap { $0 }) { location in
             vm.updateUserLocation(location)
@@ -385,6 +476,7 @@ struct ContentView: View {
                     )
                 )
             }
+            maybeShowCoachMarkTapBus()
         }
         .onReceive(traceTimer) { _ in
             guard !vm.selectedRouteShape.isEmpty else { return }
@@ -396,9 +488,31 @@ struct ContentView: View {
         .onChange(of: vm.selectedBusDetail) { _, detail in
             syncBusDetailSheet(with: detail)
         }
+        .onChange(of: vm.phase) { _, phase in
+            if case .ready = phase {
+                restoreRouteSelectionIfNeeded()
+            }
+        }
+        .onChange(of: vm.selectedRouteID) { _, routeID in
+            persistedSelectedRouteID = routeID ?? ""
+        }
+        .onChange(of: vm.selectedRouteDirectionID) { _, directionID in
+            persistedSelectedRouteDirectionID = directionID ?? ""
+        }
+        .onChange(of: vm.displayedVehicles) { _, _ in
+            maybeShowCoachMarkTapBus()
+        }
+        .onChange(of: vm.lastVehicleRefreshAt) { oldValue, newValue in
+            guard newValue != nil, oldValue != newValue else { return }
+            liveRefreshSuccessCount += 1
+            maybeShowCoachMarkPauseLive()
+        }
         .sheet(item: activeSheetBinding) { route in
             sheetView(for: route)
         }
+        .animation(.easeInOut(duration: 0.2), value: showLocationPriming)
+        .animation(.easeInOut(duration: 0.2), value: isInitialStaticLoadInProgress)
+        .animation(.easeInOut(duration: 0.2), value: activeCoachMark)
     }
 
     private var activeSheetBinding: Binding<MapSheetRoute?> {
@@ -421,6 +535,9 @@ struct ContentView: View {
                 .presentationDetents([.medium, .large])
         case .settings:
             settingsSheet
+                .presentationDetents([.medium, .large])
+        case .helpTips:
+            helpTipsSheet
                 .presentationDetents([.medium, .large])
         case .stopArrivals(let stopArrivals):
             stopArrivalsSheet(for: stopArrivals)
@@ -509,6 +626,13 @@ struct ContentView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(
+                        Color.yellow.opacity(activeCoachMark == .nearbyArrivals ? 0.95 : 0),
+                        lineWidth: 2.6
+                    )
+            )
         }
         .buttonStyle(.plain)
         .accessibilityLabel(nextBusAccessibilityLabel())
@@ -557,6 +681,27 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .disabled(vm.isRefreshing)
+    }
+
+    private var liveToggleButton: some View {
+        Button {
+            vm.toggleLiveUpdatesPaused()
+        } label: {
+            Image(systemName: vm.isLiveUpdatesPaused ? "play.fill" : "pause.fill")
+                .font(.subheadline.weight(.bold))
+                .foregroundStyle(vm.isLiveUpdatesPaused ? Color.gray : Color.green)
+                .frame(width: 44, height: 44)
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(
+                    Circle()
+                        .stroke(
+                            Color.yellow.opacity(activeCoachMark == .pauseLive ? 0.95 : 0),
+                            lineWidth: 2.6
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(vm.isLiveUpdatesPaused ? "Resume live tracking" : "Pause live tracking")
     }
 
     private var visibleStopAnnotations: [MapStopPresentation] {
@@ -658,8 +803,7 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
 
                         Button {
-                            vm.refreshLiveBuses()
-                            vm.refreshSuggestionsForCurrentState()
+                            refreshArrivalsContext()
                         } label: {
                             if vm.isRefreshing {
                                 ProgressView()
@@ -711,8 +855,7 @@ struct ContentView: View {
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                             Button("Retry") {
-                                vm.refreshLiveBuses()
-                                vm.refreshSuggestionsForCurrentState()
+                                refreshArrivalsContext()
                             }
                             .font(.subheadline.weight(.semibold))
                         }
@@ -727,8 +870,7 @@ struct ContentView: View {
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                             Button("Retry") {
-                                vm.refreshLiveBuses()
-                                vm.refreshSuggestionsForCurrentState()
+                                refreshArrivalsContext()
                             }
                             .font(.subheadline.weight(.semibold))
                         }
@@ -743,8 +885,7 @@ struct ContentView: View {
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                             Button("Retry") {
-                                vm.refreshLiveBuses()
-                                vm.refreshSuggestionsForCurrentState()
+                                refreshArrivalsContext()
                             }
                             .font(.subheadline.weight(.semibold))
                         }
@@ -815,8 +956,80 @@ struct ContentView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+
+                Section("Support") {
+                    Button {
+                        activeSheet = .helpTips
+                    } label: {
+                        Label("Help & Tips", systemImage: "questionmark.circle")
+                    }
+                }
             }
             .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        activeSheet = nil
+                    }
+                }
+            }
+        }
+    }
+
+    private var helpTipsSheet: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    tipsSection(
+                        title: "Finding your bus",
+                        items: [
+                            ("clock.arrow.circlepath", "Buses refresh every \(vm.liveRefreshIntervalSeconds) seconds automatically"),
+                            ("bus.fill", "Tap any bus on the map to see its route and stops")
+                        ]
+                    )
+
+                    tipsSection(
+                        title: "Reading the map",
+                        items: [
+                            ("circle.fill", "Bright bus markers have fresh position data"),
+                            ("circle.lefthalf.filled", "Faded markers mean position data is over 1 minute old"),
+                            ("antenna.radiowaves.left.and.right.slash", "If buses are not moving, live tracking may be unavailable"),
+                            ("calendar", "Scheduled times are still shown as a fallback")
+                        ]
+                    )
+
+                    tipsSection(
+                        title: "Checking arrivals",
+                        items: [
+                            ("list.bullet.rectangle", "Tap a bus to see its upcoming stop sequence"),
+                            ("leaf.fill", "Green times are live"),
+                            ("clock", "Grey times are scheduled estimates"),
+                            ("plus.magnifyingglass", "Zoom in on the map to see individual bus stops")
+                        ]
+                    )
+
+                    tipsSection(
+                        title: "Updating schedule data",
+                        items: [
+                            ("internaldrive", "Schedule data is cached locally and loads instantly after first use"),
+                            ("arrow.trianglehead.2.clockwise.rotate.90", "Data refreshes automatically on launch if it is outdated"),
+                            ("arrow.clockwise.circle", "Force update anytime in Settings under GTFS Data")
+                        ]
+                    )
+
+                    tipsSection(
+                        title: "Your location",
+                        items: [
+                            ("location.fill", "Used only to center the map and show nearby routes"),
+                            ("hand.raised.fill", "Never stored or shared")
+                        ]
+                    )
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 20)
+            }
+            .navigationTitle("Help & Tips")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -872,6 +1085,145 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private func tipsSection(title: String, items: [(icon: String, text: String)]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.headline)
+            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: item.icon)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 18)
+                    Text(item.text)
+                        .font(.subheadline)
+                        .foregroundStyle(.primary)
+                }
+            }
+        }
+    }
+
+    private var firstLaunchLoadingCard: some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Loading Montreal bus data…")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private var locationPermissionBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "location.slash")
+                .foregroundStyle(.secondary)
+            Text("Enable location to see nearby buses")
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            Button("Settings") {
+                openSystemSettings()
+            }
+            .font(.subheadline.weight(.semibold))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(Color.orange.opacity(0.15), in: Capsule())
+    }
+
+    private func subtleStatusBanner(text: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "antenna.radiowaves.left.and.right.slash")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(text)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: Capsule())
+    }
+
+    private var locationPrimingOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.35)
+                .ignoresSafeArea()
+
+            VStack(spacing: 16) {
+                Image(systemName: "location.viewfinder")
+                    .font(.system(size: 30, weight: .semibold))
+                    .foregroundStyle(.blue)
+                    .padding(12)
+                    .background(Color.blue.opacity(0.12), in: Circle())
+
+                Text("See buses near you")
+                    .font(.title3.weight(.semibold))
+
+                Text("Location helps center nearby buses. Your location is never stored or shared.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+
+                Button("Allow Location Access") {
+                    hasCompletedLocationPriming = true
+                    hasRequestedLocationPermission = true
+                    showLocationPriming = false
+                    locationService.requestPermission()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+
+                Button("Skip for now") {
+                    hasCompletedLocationPriming = true
+                    hasRequestedLocationPermission = false
+                    showLocationPriming = false
+                }
+                .buttonStyle(.plain)
+                .font(.subheadline.weight(.semibold))
+            }
+            .padding(20)
+            .frame(maxWidth: 360)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .padding(.horizontal, 20)
+        }
+        .transition(.opacity)
+    }
+
+    private func coachMarkOverlay(for coachMark: CoachMarkKind) -> some View {
+        ZStack {
+            Color.black.opacity(0.001)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    dismissCoachMark()
+                }
+
+            VStack {
+                Spacer()
+                Text(coachMark.text)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 11)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(Color.yellow.opacity(0.65), lineWidth: 1.2)
+                    )
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 120)
+            }
+        }
+        .transition(.opacity)
     }
 
     private var sortedUpcomingSuggestions: [BusSuggestion] {
@@ -1209,6 +1561,177 @@ struct ContentView: View {
             return "No local cache found yet."
         }
         return "Up to date"
+    }
+
+    private var isInitialStaticLoadInProgress: Bool {
+        guard vm.gtfsCacheMetadata.lastUpdatedAt == nil else { return false }
+        if case .loading = vm.phase {
+            return true
+        }
+        return false
+    }
+
+    private var shouldShowLocationPermissionBanner: Bool {
+        locationService.authorizationState == .denied || locationService.authorizationState == .restricted
+    }
+
+    private var highlightedVehicleID: String? {
+        guard activeCoachMark == .tapBus else { return nil }
+        return nearestVehicleIDForCoachMark()
+    }
+
+    private var highlightedStopID: String? {
+        guard activeCoachMark == .zoomStops else { return nil }
+        return visibleStopAnnotations.first?.id
+    }
+
+    private func refreshArrivalsContext() {
+        vm.refreshLiveBuses()
+        vm.refreshSuggestionsForCurrentState()
+    }
+
+    private func handleBusTap(_ vehicle: VehiclePosition) {
+        vm.selectBus(vehicle)
+        maybeShowCoachMarkNearbyArrivals()
+    }
+
+    private func handleLocationStartup() {
+        switch locationService.authorizationState {
+        case .authorized:
+            hasRequestedLocationPermission = true
+            showLocationPriming = false
+            locationService.requestAccessAndStart()
+        case .notDetermined:
+            if hasCompletedLocationPriming {
+                showLocationPriming = false
+                if hasRequestedLocationPermission {
+                    locationService.requestPermission()
+                }
+            } else {
+                showLocationPriming = true
+            }
+        case .denied, .restricted:
+            showLocationPriming = false
+        }
+    }
+
+    private func handleLocationAuthorizationChange(_ state: LocationAuthorizationState) {
+        switch state {
+        case .authorized:
+            showLocationPriming = false
+            hasRequestedLocationPermission = true
+            locationService.requestAccessAndStart()
+        case .notDetermined:
+            if hasCompletedLocationPriming {
+                showLocationPriming = false
+            }
+        case .denied, .restricted:
+            showLocationPriming = false
+        }
+    }
+
+    private func restoreMapCameraIfNeeded() {
+        guard hasPersistedMapCamera else { return }
+        let center = CLLocationCoordinate2D(
+            latitude: persistedMapCenterLatitude,
+            longitude: persistedMapCenterLongitude
+        )
+        guard CLLocationCoordinate2DIsValid(center), persistedMapCameraDistance > 0 else { return }
+        mapCamera = .camera(
+            MapCamera(
+                centerCoordinate: center,
+                distance: persistedMapCameraDistance,
+                heading: 0,
+                pitch: 0
+            )
+        )
+        mapCenterCoordinate = center
+        mapCameraDistance = persistedMapCameraDistance
+        didCenterToUser = true
+    }
+
+    private func persistMapCameraIfNeeded(center: CLLocationCoordinate2D, distance: CLLocationDistance) {
+        guard CLLocationCoordinate2DIsValid(center), distance > 0 else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastMapPersistAt) >= mapPersistInterval else { return }
+
+        if hasPersistedMapCamera {
+            let previousCenter = CLLocation(latitude: persistedMapCenterLatitude, longitude: persistedMapCenterLongitude)
+            let currentCenter = CLLocation(latitude: center.latitude, longitude: center.longitude)
+            let movedDistance = currentCenter.distance(from: previousCenter)
+            let zoomDelta = abs(persistedMapCameraDistance - distance)
+            guard movedDistance >= mapPersistDistanceThreshold || zoomDelta >= mapPersistZoomThreshold else { return }
+        }
+
+        persistedMapCenterLatitude = center.latitude
+        persistedMapCenterLongitude = center.longitude
+        persistedMapCameraDistance = distance
+        hasPersistedMapCamera = true
+        lastMapPersistAt = now
+    }
+
+    private func restoreRouteSelectionIfNeeded() {
+        guard !hasRestoredRouteSelection else { return }
+        hasRestoredRouteSelection = true
+
+        let routeID = persistedSelectedRouteID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !routeID.isEmpty else { return }
+        let direction = persistedSelectedRouteDirectionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let directionID = direction.isEmpty ? nil : direction
+        vm.restoreRouteSelection(routeID: routeID, directionID: directionID)
+    }
+
+    private func maybeShowCoachMarkTapBus() {
+        guard activeCoachMark == nil,
+              !hasShownCoachTapBus,
+              locationService.authorizationState.isAuthorized,
+              !vm.displayedVehicles.isEmpty else { return }
+        hasShownCoachTapBus = true
+        activeCoachMark = .tapBus
+    }
+
+    private func maybeShowCoachMarkZoomStops() {
+        guard activeCoachMark == nil,
+              !hasShownCoachZoomStops,
+              !visibleStopAnnotations.isEmpty else { return }
+        hasShownCoachZoomStops = true
+        activeCoachMark = .zoomStops
+    }
+
+    private func maybeShowCoachMarkPauseLive() {
+        guard activeCoachMark == nil,
+              !hasShownCoachPauseLive,
+              liveRefreshSuccessCount >= 2 else { return }
+        hasShownCoachPauseLive = true
+        activeCoachMark = .pauseLive
+    }
+
+    private func maybeShowCoachMarkNearbyArrivals() {
+        guard activeCoachMark == nil, !hasShownCoachNearbyArrivals else { return }
+        hasShownCoachNearbyArrivals = true
+        activeCoachMark = .nearbyArrivals
+    }
+
+    private func dismissCoachMark() {
+        guard activeCoachMark != nil else { return }
+        self.activeCoachMark = nil
+    }
+
+    private func nearestVehicleIDForCoachMark() -> String? {
+        if let userLocation = locationService.location {
+            let userPoint = CLLocation(latitude: userLocation.latitude, longitude: userLocation.longitude)
+            return vm.displayedVehicles.min(by: { lhs, rhs in
+                let lhsLocation = CLLocation(latitude: lhs.coord.latitude, longitude: lhs.coord.longitude)
+                let rhsLocation = CLLocation(latitude: rhs.coord.latitude, longitude: rhs.coord.longitude)
+                return lhsLocation.distance(from: userPoint) < rhsLocation.distance(from: userPoint)
+            })?.id
+        }
+        return vm.displayedVehicles.first?.id
+    }
+
+    private func openSystemSettings() {
+        guard let settingsURL = URL(string: UIApplication.openSettingsURLString) else { return }
+        openURL(settingsURL)
     }
 
     private func traceArrowPoints() -> [TraceArrowPoint] {

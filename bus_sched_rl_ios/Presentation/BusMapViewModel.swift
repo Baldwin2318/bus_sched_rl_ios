@@ -160,6 +160,7 @@ final class BusMapViewModel: ObservableObject {
     @Published private(set) var selectedBusID: String?
     @Published private(set) var selectedBusDetail: BusDetailPresentation?
     @Published private(set) var selectedRouteID: String?
+    @Published private(set) var selectedRouteDirectionID: String?
     @Published private(set) var availableRoutes: [String] = []
     @Published private(set) var phase: BusMapPhase = .idle
     @Published private(set) var isRefreshing = false
@@ -167,6 +168,7 @@ final class BusMapViewModel: ObservableObject {
     @Published private(set) var lastTraceSource: String = "none"
     @Published private(set) var isLiveUpdatesPaused = false
     @Published private(set) var lastVehicleRefreshAt: Date?
+    @Published private(set) var liveFeedStatusMessage: String?
 
     @Published private(set) var gtfsCacheMetadata: GTFSCacheMetadata = .empty
     @Published private(set) var isRefreshingStaticData = false
@@ -221,6 +223,10 @@ final class BusMapViewModel: ObservableObject {
         }
     }
 
+    var liveRefreshIntervalSeconds: Int {
+        max(1, Int(round(durationToTimeInterval(livePollInterval))))
+    }
+
     var nextBusGlance: NextBusGlance? {
         guard !nearbyScheduleSuggestions.isEmpty else { return nil }
         let withEta = nearbyScheduleSuggestions.filter { $0.etaMinutes != nil }
@@ -249,7 +255,7 @@ final class BusMapViewModel: ObservableObject {
     init(
         gtfsRepository: GTFSRepository = LiveGTFSRepository(),
         realtimeRepository: RealtimeRepository = STMRealtimeRepository(),
-        livePollInterval: Duration = .seconds(20),
+        livePollInterval: Duration = .seconds(30),
         interpolationConfig: InterpolationConfig = .default
     ) {
         self.gtfsRepository = gtfsRepository
@@ -337,6 +343,11 @@ final class BusMapViewModel: ObservableObject {
     func selectBus(_ bus: VehiclePosition) {
         selectedBusID = bus.id
         selectedRouteID = bus.route
+        if bus.route != nil {
+            selectedRouteDirectionID = bus.direction.map(String.init) ?? "0"
+        } else {
+            selectedRouteDirectionID = nil
+        }
         let result = traceResolver.resolveTrace(
             bus: bus,
             routeShapes: routeShapes,
@@ -357,8 +368,35 @@ final class BusMapViewModel: ObservableObject {
         selectedBusID = nil
         selectedBusDetail = nil
         selectedRouteID = suggestion.route
+        selectedRouteDirectionID = suggestion.directionID
         if let direction = suggestion.directionID {
             selectedRouteShape = routeShapes[suggestion.route]?[direction] ?? []
+        } else {
+            selectedRouteShape = []
+        }
+    }
+
+    func restoreRouteSelection(routeID: String, directionID: String?) {
+        let normalizedRouteID = routeID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedRouteID.isEmpty else { return }
+
+        selectedBusID = nil
+        selectedBusDetail = nil
+        selectedRouteID = normalizedRouteID
+
+        let preferredDirection = directionID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedDirection: String?
+        if let preferredDirection,
+           !preferredDirection.isEmpty,
+           routeShapes[normalizedRouteID]?[preferredDirection] != nil {
+            resolvedDirection = preferredDirection
+        } else {
+            resolvedDirection = routeShapes[normalizedRouteID]?.keys.sorted().first
+        }
+
+        selectedRouteDirectionID = resolvedDirection
+        if let resolvedDirection {
+            selectedRouteShape = routeShapes[normalizedRouteID]?[resolvedDirection] ?? []
         } else {
             selectedRouteShape = []
         }
@@ -546,7 +584,12 @@ final class BusMapViewModel: ObservableObject {
             await didReceiveSnapshot(snapshot, trigger: trigger)
         } catch {
             await MainActor.run {
-                phase = .error("Refresh failed: \(error.localizedDescription)")
+                if hasLoadedStaticData {
+                    liveFeedStatusMessage = "Live positions unavailable — showing scheduled times"
+                    phase = .ready
+                } else {
+                    phase = .error("Refresh failed: \(error.localizedDescription)")
+                }
             }
         }
 
@@ -573,6 +616,7 @@ final class BusMapViewModel: ObservableObject {
             }
             tripUpdatesByTripID = updatesByTripID
             lastVehicleRefreshAt = Date()
+            liveFeedStatusMessage = nil
             updateDisplayedVehicleSelection(using: snapshot.vehicles)
             applyDisplayedVehiclesFrame(interpolatedVehicles.isEmpty ? snapshot.vehicles : interpolatedVehicles)
             scheduleSuggestionRefresh()
