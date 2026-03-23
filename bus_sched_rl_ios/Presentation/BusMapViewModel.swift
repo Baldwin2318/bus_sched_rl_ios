@@ -116,6 +116,17 @@ struct NextBusGlance: Equatable {
     let metersAway: Int?
 }
 
+enum SearchSelectionMapResponse {
+    case route(
+        shape: [CLLocationCoordinate2D],
+        detail: BusDetailPresentation?
+    )
+    case stop(
+        coordinate: CLLocationCoordinate2D,
+        arrivals: StopArrivalsPresentation?
+    )
+}
+
 enum LiveRefreshTrigger {
     case initialLoad
     case polling
@@ -169,6 +180,7 @@ final class BusMapViewModel: ObservableObject {
     @Published private(set) var isLiveUpdatesPaused = false
     @Published private(set) var lastVehicleRefreshAt: Date?
     @Published private(set) var liveFeedStatusMessage: String?
+    @Published private(set) var searchIndex: SearchIndex?
 
     @Published private(set) var gtfsCacheMetadata: GTFSCacheMetadata = .empty
     @Published private(set) var isRefreshingStaticData = false
@@ -199,6 +211,7 @@ final class BusMapViewModel: ObservableObject {
     private var interpolationTask: Task<Void, Never>?
     private var staticRefreshTask: Task<Void, Never>?
     private var suggestionTask: Task<Void, Never>?
+    private var searchIndexBuildTask: Task<Void, Never>?
     private var suggestionToken = 0
     private var interpolationToken = 0
     private var interpolatedVehicles: [VehiclePosition] = []
@@ -208,6 +221,8 @@ final class BusMapViewModel: ObservableObject {
     private let nearbyRouteDistance: CLLocationDistance = 600
     private let liveFreshnessThreshold: TimeInterval = 35
     private let agingFreshnessThreshold: TimeInterval = 90
+    private let routeSnapThresholdMeters: CLLocationDistance = 50
+    private let noRouteFallbackAnimationDuration: TimeInterval = 0.5
     private let livePollInterval: Duration
 
     var statusMessage: String {
@@ -217,6 +232,9 @@ final class BusMapViewModel: ObservableObject {
         case .loading(let message):
             return message
         case .ready:
+            if let liveFeedStatusMessage {
+                return liveFeedStatusMessage
+            }
             return isRefreshing ? "Refreshing live buses..." : "Ready"
         case .error(let message):
             return message
@@ -269,6 +287,7 @@ final class BusMapViewModel: ObservableObject {
         interpolationTask?.cancel()
         staticRefreshTask?.cancel()
         suggestionTask?.cancel()
+        searchIndexBuildTask?.cancel()
     }
 
     func loadIfNeeded() {
@@ -534,6 +553,18 @@ final class BusMapViewModel: ObservableObject {
         scheduleSuggestionRefresh()
     }
 
+    func applySearchSelection(_ result: SearchResult) -> SearchSelectionMapResponse? {
+        switch result {
+        case .route(let routeMatch):
+            return applyRouteSearchSelection(
+                routeID: routeMatch.route.routeId,
+                preferredDirectionID: routeMatch.directionId
+            )
+        case .stop(let stopMatch):
+            return applyStopSearchSelection(stopMatch)
+        }
+    }
+
     func gtfsStalenessLevel(referenceDate: Date = Date()) -> GTFSStalenessLevel {
         if let feedEndDate = gtfsCacheMetadata.feedInfo?.feedEndDate {
             if referenceDate > feedEndDate {
@@ -585,7 +616,7 @@ final class BusMapViewModel: ObservableObject {
         } catch {
             await MainActor.run {
                 if hasLoadedStaticData {
-                    liveFeedStatusMessage = "Live positions unavailable — showing scheduled times"
+                    liveFeedStatusMessage = "Live tracking unavailable"
                     phase = .ready
                 } else {
                     phase = .error("Refresh failed: \(error.localizedDescription)")
@@ -624,7 +655,7 @@ final class BusMapViewModel: ObservableObject {
             phase = .ready
         }
 
-        await beginInterpolation(to: snapshot.vehicles, trigger: trigger)
+        await beginInterpolation(to: snapshot.vehicles)
     }
 
     private func didFinishRefresh(trigger: LiveRefreshTrigger) async {
@@ -638,7 +669,7 @@ final class BusMapViewModel: ObservableObject {
         }
     }
 
-    private func beginInterpolation(to targetVehicles: [VehiclePosition], trigger: LiveRefreshTrigger) async {
+    private func beginInterpolation(to targetVehicles: [VehiclePosition]) async {
         stopInterpolation()
         let token = interpolationToken
 
@@ -649,15 +680,18 @@ final class BusMapViewModel: ObservableObject {
             return
         }
 
-        await interpolationEngine.beginTransition(
+        let routeCandidatesByVehicleID = buildRouteCandidatesByVehicleID(for: targetVehicles)
+        let totalSeconds = await interpolationEngine.beginTransition(
             to: targetVehicles,
-            maxJumpMeters: interpolationConfig.maxJumpMeters
+            routeCandidatesByVehicleID: routeCandidatesByVehicleID,
+            routeAnimationDuration: durationToTimeInterval(livePollInterval),
+            fallbackAnimationDuration: noRouteFallbackAnimationDuration,
+            maxJumpMeters: interpolationConfig.maxJumpMeters,
+            offRouteThresholdMeters: routeSnapThresholdMeters,
+            token: token
         )
-
-        let duration = interpolationConfig.duration(forPollInterval: livePollInterval, trigger: trigger)
-        let totalSeconds = durationToTimeInterval(duration)
         guard totalSeconds > 0 else {
-            let frame = await interpolationEngine.frame(fraction: 1)
+            let frame = await interpolationEngine.frame(elapsed: 0, token: token)
             interpolatedVehicles = frame
             applyDisplayedVehiclesFrame(frame)
             return
@@ -669,8 +703,7 @@ final class BusMapViewModel: ObservableObject {
 
             while !Task.isCancelled {
                 let elapsed = Date().timeIntervalSince(startedAt)
-                let progress = min(max(elapsed / totalSeconds, 0), 1)
-                let frame = await self.interpolationEngine.frame(fraction: progress)
+                let frame = await self.interpolationEngine.frame(elapsed: elapsed, token: token)
 
                 await MainActor.run {
                     guard self.interpolationToken == token else { return }
@@ -678,7 +711,7 @@ final class BusMapViewModel: ObservableObject {
                     self.applyDisplayedVehiclesFrame(frame)
                 }
 
-                if progress >= 1 {
+                if elapsed >= totalSeconds {
                     break
                 }
 
@@ -700,6 +733,47 @@ final class BusMapViewModel: ObservableObject {
         interpolationToken += 1
         interpolationTask?.cancel()
         interpolationTask = nil
+    }
+
+    private func buildRouteCandidatesByVehicleID(for vehicles: [VehiclePosition]) -> [String: [[CLLocationCoordinate2D]]] {
+        var candidatesByVehicleID: [String: [[CLLocationCoordinate2D]]] = [:]
+        candidatesByVehicleID.reserveCapacity(vehicles.count)
+
+        for vehicle in vehicles {
+            candidatesByVehicleID[vehicle.id] = routeCandidates(for: vehicle)
+        }
+
+        return candidatesByVehicleID
+    }
+
+    private func routeCandidates(for vehicle: VehiclePosition) -> [[CLLocationCoordinate2D]] {
+        guard let routeID = vehicle.route?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !routeID.isEmpty else {
+            return []
+        }
+
+        let directionID = vehicle.direction.map(String.init) ?? "0"
+        let key = RouteKey(route: routeID, direction: directionID)
+        var candidates: [[CLLocationCoordinate2D]] = []
+
+        if let shapeIDs = routeShapeIDsByKey[key] {
+            for shapeID in shapeIDs {
+                guard let shape = shapeCoordinatesByID[shapeID], shape.count >= 2 else { continue }
+                candidates.append(shape)
+            }
+        }
+
+        if let primaryShape = routeShapes[routeID]?[directionID], primaryShape.count >= 2 {
+            candidates.append(primaryShape)
+        }
+
+        if candidates.isEmpty, let routeDirectionShapes = routeShapes[routeID] {
+            for shape in routeDirectionShapes.values where shape.count >= 2 {
+                candidates.append(shape)
+            }
+        }
+
+        return candidates
     }
 
     private func durationToTimeInterval(_ duration: Duration) -> TimeInterval {
@@ -774,9 +848,36 @@ final class BusMapViewModel: ObservableObject {
         rebuildStopIndexes()
         availableRoutes = staticData.availableRoutes
         hasLoadedStaticData = true
+        scheduleSearchIndexBuild(using: staticData)
         await routeIndex.rebuild(from: staticData.routeShapes)
         scheduleSuggestionRefresh()
         refreshSelectedBusDetailIfNeeded()
+    }
+
+    private func scheduleSearchIndexBuild(using staticData: GTFSStaticData) {
+        searchIndexBuildTask?.cancel()
+        searchIndex = nil
+
+        searchIndexBuildTask = Task { [weak self] in
+            guard let self else { return }
+            let builtIndex = await self.buildSearchIndex(staticData: staticData)
+            if Task.isCancelled { return }
+
+            await MainActor.run {
+                guard !Task.isCancelled else { return }
+                self.searchIndex = builtIndex
+                self.searchIndexBuildTask = nil
+            }
+        }
+    }
+
+    private func buildSearchIndex(staticData: GTFSStaticData) async -> SearchIndex {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let index = SearchIndexBuilder.build(from: staticData)
+                continuation.resume(returning: index)
+            }
+        }
     }
 
     private func rebuildStopIndexes() {
@@ -866,6 +967,61 @@ final class BusMapViewModel: ObservableObject {
             return
         }
         selectedBusDetail = buildBusDetail(for: bus)
+    }
+
+    private func applyRouteSearchSelection(routeID: String, preferredDirectionID: String?) -> SearchSelectionMapResponse {
+        selectedBusID = nil
+        selectedBusDetail = nil
+        selectedRouteID = routeID
+
+        let directionID = resolvedDirectionID(for: routeID, preferredDirectionID: preferredDirectionID)
+        selectedRouteDirectionID = directionID
+        if let directionID {
+            selectedRouteShape = routeShapes[routeID]?[directionID] ?? []
+        } else {
+            selectedRouteShape = []
+        }
+
+        let detail = directionID.flatMap { routeDetail(route: routeID, directionID: $0) }
+        return .route(shape: selectedRouteShape, detail: detail)
+    }
+
+    private func applyStopSearchSelection(_ stopMatch: StopSearchMatch) -> SearchSelectionMapResponse {
+        selectedBusID = nil
+        selectedBusDetail = nil
+        selectedRouteID = nil
+        selectedRouteDirectionID = nil
+        selectedRouteShape = []
+
+        let stopID = stopMatch.stop.stopId
+        let coordinate = allStopsByID[stopID]?.coord ?? stopMatch.stop.coordinate
+        let arrivals = stopArrivals(for: stopID)
+        return .stop(coordinate: coordinate, arrivals: arrivals)
+    }
+
+    private func resolvedDirectionID(for routeID: String, preferredDirectionID: String?) -> String? {
+        if let preferredDirectionID,
+           routeShapes[routeID]?[preferredDirectionID] != nil ||
+            routeStopSchedules[RouteKey(route: routeID, direction: preferredDirectionID)] != nil {
+            return preferredDirectionID
+        }
+
+        if selectedRouteID == routeID,
+           let selectedRouteDirectionID,
+           routeShapes[routeID]?[selectedRouteDirectionID] != nil ||
+            routeStopSchedules[RouteKey(route: routeID, direction: selectedRouteDirectionID)] != nil {
+            return selectedRouteDirectionID
+        }
+
+        if let shapeDirection = routeShapes[routeID]?.keys.sorted().first {
+            return shapeDirection
+        }
+
+        let scheduleDirections = routeStopSchedules.keys
+            .filter { $0.route == routeID }
+            .map(\.direction)
+            .sorted()
+        return scheduleDirections.first
     }
 
     private func buildBusDetail(for bus: VehiclePosition) -> BusDetailPresentation? {

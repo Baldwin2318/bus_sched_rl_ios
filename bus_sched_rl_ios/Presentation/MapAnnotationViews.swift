@@ -1,5 +1,12 @@
 import SwiftUI
 
+enum MapAnnotationMetrics {
+    static let minimumTapTarget: CGFloat = 44
+    static let busCircleDiameter: CGFloat = 34
+    static let busRouteTextSize: CGFloat = 14
+    static let busDirectionTextSize: CGFloat = 12
+}
+
 struct StopMarkerView: View {
     let name: String
     let isHighlighted: Bool
@@ -28,6 +35,11 @@ struct StopMarkerView: View {
                     .frame(width: 5, height: 5)
             }
             .shadow(color: .black.opacity(0.3), radius: 4, x: 0, y: 2)
+            .frame(
+                minWidth: MapAnnotationMetrics.minimumTapTarget,
+                minHeight: MapAnnotationMetrics.minimumTapTarget
+            )
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Stop \(name)")
@@ -41,7 +53,8 @@ struct StopMarkerView: View {
 }
 
 struct BusMarkerView: View {
-    let title: String
+    let routeText: String
+    let directionText: String
     let heading: Double
     let fillColor: Color
     let strokeColor: Color
@@ -60,7 +73,10 @@ struct BusMarkerView: View {
                 ZStack {
                     Circle()
                         .fill(fillColor)
-                        .frame(width: 34, height: 34)
+                        .frame(
+                            width: MapAnnotationMetrics.busCircleDiameter,
+                            height: MapAnnotationMetrics.busCircleDiameter
+                        )
                         .overlay(
                             Circle()
                                 .stroke(Color.white.opacity(0.95), lineWidth: 2.4)
@@ -74,17 +90,25 @@ struct BusMarkerView: View {
                         .foregroundStyle(glyphColor)
                         .rotationEffect(.degrees(heading))
                 }
-                Text(title)
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(labelTextColor)
-                    .lineLimit(1)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(labelBackgroundColor, in: Capsule())
-                    .overlay(
-                        Capsule()
-                            .stroke(Color.white.opacity(0.88), lineWidth: 0.9)
-                    )
+                VStack(spacing: 1) {
+                    Text(routeText)
+                        .font(.system(size: MapAnnotationMetrics.busRouteTextSize, weight: .bold))
+                        .lineLimit(1)
+                    if !directionText.isEmpty {
+                        Text(directionText)
+                            .font(.system(size: MapAnnotationMetrics.busDirectionTextSize, weight: .semibold))
+                            .lineLimit(1)
+                    }
+                }
+                .foregroundStyle(labelTextColor)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(labelBackgroundColor, in: Capsule())
+                .overlay(
+                    Capsule()
+                        .stroke(Color.white.opacity(0.88), lineWidth: 0.9)
+                )
             }
             .opacity(opacity)
             .scaleEffect(scale)
@@ -100,8 +124,17 @@ struct BusMarkerView: View {
                 x: 0,
                 y: isHighlighted ? 0 : 4
             )
+            .frame(
+                minWidth: MapAnnotationMetrics.minimumTapTarget,
+                minHeight: MapAnnotationMetrics.minimumTapTarget
+            )
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(title)
+        .accessibilityLabel(
+            directionText.isEmpty
+            ? "Route \(routeText)"
+            : "Route \(routeText), \(directionText)"
+        )
     }
 }

@@ -115,6 +115,105 @@ final class BusMapViewModelUXContractTests: XCTestCase {
         XCTAssertNotNil(arrivals?.arrivals.first?.arrivalText)
     }
 
+    func testApplySearchSelectionUsesMatchedDirectionWhenAvailable() async throws {
+        let staticData = makeStaticDataWithDirections(route: "55", directions: ["0", "1"])
+        let vm = BusMapViewModel(
+            gtfsRepository: StaticGTFSRepository(staticData: staticData),
+            realtimeRepository: SnapshotRealtimeRepository(snapshot: RealtimeSnapshot(vehicles: [], tripUpdates: [])),
+            livePollInterval: .seconds(120)
+        )
+
+        vm.loadIfNeeded()
+        try await waitForReady(vm)
+
+        let routeEntry = RouteSearchEntry(
+            routeId: "55",
+            routeShortName: "55",
+            routeLongName: "Mock Route",
+            routeColor: nil,
+            directionOptions: [
+                RouteDirectionSearchEntry(directionId: "0", directionText: "Nord"),
+                RouteDirectionSearchEntry(directionId: "1", directionText: "Sud")
+            ]
+        )
+        let match = RouteSearchMatch(
+            route: routeEntry,
+            directionId: "1",
+            directionText: "Sud",
+            distanceMeters: nil
+        )
+
+        _ = vm.applySearchSelection(.route(match))
+
+        XCTAssertEqual(vm.selectedRouteDirectionID, "1")
+    }
+
+    func testApplySearchSelectionFallsBackWhenMatchedDirectionIsUnavailable() async throws {
+        let staticData = makeStaticData(route: "55", direction: "0")
+        let vm = BusMapViewModel(
+            gtfsRepository: StaticGTFSRepository(staticData: staticData),
+            realtimeRepository: SnapshotRealtimeRepository(snapshot: RealtimeSnapshot(vehicles: [], tripUpdates: [])),
+            livePollInterval: .seconds(120)
+        )
+
+        vm.loadIfNeeded()
+        try await waitForReady(vm)
+
+        let routeEntry = RouteSearchEntry(
+            routeId: "55",
+            routeShortName: "55",
+            routeLongName: "Mock Route",
+            routeColor: nil,
+            directionOptions: [
+                RouteDirectionSearchEntry(directionId: "0", directionText: "Nord")
+            ]
+        )
+        let match = RouteSearchMatch(
+            route: routeEntry,
+            directionId: "9",
+            directionText: "Imaginary Direction",
+            distanceMeters: nil
+        )
+
+        _ = vm.applySearchSelection(.route(match))
+
+        XCTAssertEqual(vm.selectedRouteDirectionID, "0")
+    }
+
+    func testLiveFailureAfterStaticLoadSetsOutageStatus() async throws {
+        let vm = BusMapViewModel(
+            gtfsRepository: StaticGTFSRepository(staticData: makeStaticData()),
+            realtimeRepository: AlwaysFailingRealtimeRepository(),
+            livePollInterval: .seconds(120)
+        )
+
+        vm.loadIfNeeded()
+        try await waitForReady(vm)
+        try await waitForLiveFeedStatus(vm, equals: "Live tracking unavailable")
+
+        XCTAssertEqual(vm.liveFeedStatusMessage, "Live tracking unavailable")
+        XCTAssertEqual(vm.statusMessage, "Live tracking unavailable")
+    }
+
+    func testLiveOutageStatusClearsAfterRecovery() async throws {
+        let vm = BusMapViewModel(
+            gtfsRepository: StaticGTFSRepository(staticData: makeStaticData()),
+            realtimeRepository: FailThenSucceedRealtimeRepository(
+                snapshot: RealtimeSnapshot(vehicles: [], tripUpdates: [])
+            ),
+            livePollInterval: .seconds(120)
+        )
+
+        vm.loadIfNeeded()
+        try await waitForReady(vm)
+        try await waitForLiveFeedStatus(vm, equals: "Live tracking unavailable")
+
+        vm.refreshLiveBuses()
+        try await waitForLiveFeedStatusToClear(vm)
+
+        XCTAssertNil(vm.liveFeedStatusMessage)
+    }
+
     private func waitForReady(_ vm: BusMapViewModel, timeoutSeconds: TimeInterval = 2.0) async throws {
         let timeout = Date().addingTimeInterval(timeoutSeconds)
         while Date() < timeout {
@@ -128,6 +227,35 @@ final class BusMapViewModelUXContractTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(20))
         }
         XCTFail("Timed out waiting for view model to become ready")
+    }
+
+    private func waitForLiveFeedStatus(
+        _ vm: BusMapViewModel,
+        equals expected: String,
+        timeoutSeconds: TimeInterval = 2.0
+    ) async throws {
+        let timeout = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < timeout {
+            if vm.liveFeedStatusMessage == expected {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("Timed out waiting for live feed status '\(expected)'")
+    }
+
+    private func waitForLiveFeedStatusToClear(
+        _ vm: BusMapViewModel,
+        timeoutSeconds: TimeInterval = 2.0
+    ) async throws {
+        let timeout = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < timeout {
+            if vm.liveFeedStatusMessage == nil && !vm.isRefreshing {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("Timed out waiting for live feed status to clear")
     }
 
     private func makeStaticData(
@@ -165,7 +293,60 @@ final class BusMapViewModelUXContractTests: XCTestCase {
             shapeCoordinatesByID: ["shape-\(route)-\(direction)": shape],
             routeShapeIDsByKey: [key: ["shape-\(route)-\(direction)"]],
             routeDirectionLabels: [key: "Nord"],
+            routeNamesByRouteID: [route: GTFSRouteName(shortName: route, longName: "Route \(route)")],
             routeStylesByRouteID: stylesByRouteID,
+            feedInfo: nil
+        )
+    }
+
+    private func makeStaticDataWithDirections(route: String, directions: [String]) -> GTFSStaticData {
+        var routeShapes: [String: [String: [CLLocationCoordinate2D]]] = [route: [:]]
+        var routeStops: [RouteKey: [BusStop]] = [:]
+        var routeStopSchedules: [RouteKey: [RouteStopSchedule]] = [:]
+        var shapeCoordinatesByID: [String: [CLLocationCoordinate2D]] = [:]
+        var routeShapeIDsByKey: [RouteKey: [String]] = [:]
+        var routeDirectionLabels: [RouteKey: String] = [:]
+
+        for (index, direction) in directions.enumerated() {
+            let stopID = "STOP-\(direction)"
+            let latitudeBase = 45.50 + (Double(index) * 0.01)
+            let shape: [CLLocationCoordinate2D] = [
+                CLLocationCoordinate2D(latitude: latitudeBase, longitude: -73.62),
+                CLLocationCoordinate2D(latitude: latitudeBase + 0.01, longitude: -73.58)
+            ]
+            routeShapes[route, default: [:]][direction] = shape
+
+            let shapeID = "shape-\(route)-\(direction)"
+            shapeCoordinatesByID[shapeID] = shape
+            let key = RouteKey(route: route, direction: direction)
+            routeShapeIDsByKey[key] = [shapeID]
+            routeDirectionLabels[key] = direction == "0" ? "Nord" : "Sud"
+
+            let stop = BusStop(
+                id: stopID,
+                name: "Mock Stop \(direction)",
+                coord: shape[0]
+            )
+            routeStops[key] = [stop]
+            routeStopSchedules[key] = [
+                RouteStopSchedule(
+                    stop: stop,
+                    sequence: 1,
+                    scheduledArrival: "08:10:00",
+                    scheduledDeparture: "08:12:00"
+                )
+            ]
+        }
+
+        return GTFSStaticData(
+            routeShapes: routeShapes,
+            routeStops: routeStops,
+            routeStopSchedules: routeStopSchedules,
+            shapeCoordinatesByID: shapeCoordinatesByID,
+            routeShapeIDsByKey: routeShapeIDsByKey,
+            routeDirectionLabels: routeDirectionLabels,
+            routeNamesByRouteID: [route: GTFSRouteName(shortName: route, longName: "Route \(route)")],
+            routeStylesByRouteID: [:],
             feedInfo: nil
         )
     }
@@ -200,5 +381,36 @@ private actor SnapshotRealtimeRepository: RealtimeRepository {
 
     func fetchSnapshot() async throws -> RealtimeSnapshot {
         snapshot
+    }
+}
+
+private actor AlwaysFailingRealtimeRepository: RealtimeRepository {
+    private enum MockError: Error {
+        case unavailable
+    }
+
+    func fetchSnapshot() async throws -> RealtimeSnapshot {
+        throw MockError.unavailable
+    }
+}
+
+private actor FailThenSucceedRealtimeRepository: RealtimeRepository {
+    private enum MockError: Error {
+        case unavailable
+    }
+
+    private let snapshot: RealtimeSnapshot
+    private var callCount = 0
+
+    init(snapshot: RealtimeSnapshot) {
+        self.snapshot = snapshot
+    }
+
+    func fetchSnapshot() async throws -> RealtimeSnapshot {
+        callCount += 1
+        if callCount == 1 {
+            throw MockError.unavailable
+        }
+        return snapshot
     }
 }

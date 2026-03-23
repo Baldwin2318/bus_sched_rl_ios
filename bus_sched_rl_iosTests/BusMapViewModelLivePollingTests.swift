@@ -47,6 +47,7 @@ private actor MockGTFSRepository: GTFSRepository {
             shapeCoordinatesByID: [:],
             routeShapeIDsByKey: [:],
             routeDirectionLabels: [:],
+            routeNamesByRouteID: [:],
             routeStylesByRouteID: [:],
             feedInfo: nil
         )

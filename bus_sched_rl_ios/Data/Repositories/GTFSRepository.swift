@@ -9,6 +9,7 @@ struct GTFSStaticData {
     let shapeCoordinatesByID: [String: [CLLocationCoordinate2D]]
     let routeShapeIDsByKey: [RouteKey: [String]]
     let routeDirectionLabels: [RouteKey: String]
+    let routeNamesByRouteID: [String: GTFSRouteName]
     let routeStylesByRouteID: [String: GTFSRouteStyle]
     let feedInfo: GTFSFeedInfo?
 
@@ -31,6 +32,13 @@ private struct TripsParseResult {
 }
 
 private enum GTFSParsers {
+    struct RouteCatalogParseResult {
+        let stylesByRouteID: [String: GTFSRouteStyle]
+        let namesByRouteID: [String: GTFSRouteName]
+
+        static let empty = RouteCatalogParseResult(stylesByRouteID: [:], namesByRouteID: [:])
+    }
+
     private static func normalize(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -187,8 +195,9 @@ private enum GTFSParsers {
         return trimmed
     }
 
-    static func parseRouteStyles(_ text: String) -> [String: GTFSRouteStyle] {
+    static func parseRouteCatalog(_ text: String) -> RouteCatalogParseResult {
         var stylesByRouteID: [String: GTFSRouteStyle] = [:]
+        var namesByRouteID: [String: GTFSRouteName] = [:]
         var isHeader = true
         var header: [String: Int] = [:]
 
@@ -203,6 +212,27 @@ private enum GTFSParsers {
 
             let routeID = normalize(cols[routeIDIdx])
             guard !routeID.isEmpty else { return }
+
+            let shortName: String
+            if let shortNameIdx = header["route_short_name"], shortNameIdx < cols.count {
+                shortName = normalize(cols[shortNameIdx])
+            } else {
+                shortName = ""
+            }
+
+            let longName: String
+            if let longNameIdx = header["route_long_name"], longNameIdx < cols.count {
+                longName = normalize(cols[longNameIdx])
+            } else {
+                longName = ""
+            }
+
+            let resolvedShortName = shortName.isEmpty ? routeID : shortName
+            let resolvedLongName = longName.isEmpty ? resolvedShortName : longName
+            namesByRouteID[routeID] = GTFSRouteName(
+                shortName: resolvedShortName,
+                longName: resolvedLongName
+            )
 
             let routeColorHex: String?
             if let routeColorIdx = header["route_color"], routeColorIdx < cols.count {
@@ -225,7 +255,10 @@ private enum GTFSParsers {
             )
         }
 
-        return stylesByRouteID
+        return RouteCatalogParseResult(
+            stylesByRouteID: stylesByRouteID,
+            namesByRouteID: namesByRouteID
+        )
     }
 
     private static func normalizedOptional(_ value: String?) -> String? {
@@ -438,6 +471,12 @@ private struct CachedRouteDirectionLabelEntry: Codable {
     let label: String
 }
 
+private struct CachedRouteNameEntry: Codable {
+    let route: String
+    let shortName: String
+    let longName: String
+}
+
 private struct CachedRouteStyleEntry: Codable {
     let route: String
     let routeColorHex: String?
@@ -450,6 +489,7 @@ private struct GTFSStaticCachePayload: Codable {
     let shapeCoordinates: [CachedShapeCoordinatesEntry]
     let routeShapeIDs: [CachedRouteShapeIDsEntry]
     let routeDirectionLabels: [CachedRouteDirectionLabelEntry]
+    let routeNames: [CachedRouteNameEntry]
     let routeStyles: [CachedRouteStyleEntry]
     let feedInfo: GTFSFeedInfo?
 
@@ -485,6 +525,14 @@ private struct GTFSStaticCachePayload: Codable {
 
         routeDirectionLabels = staticData.routeDirectionLabels.map { key, label in
             CachedRouteDirectionLabelEntry(route: key.route, direction: key.direction, label: label)
+        }
+
+        routeNames = staticData.routeNamesByRouteID.map { routeID, routeName in
+            CachedRouteNameEntry(
+                route: routeID,
+                shortName: routeName.shortName,
+                longName: routeName.longName
+            )
         }
 
         routeStyles = staticData.routeStylesByRouteID.map { routeID, style in
@@ -530,6 +578,14 @@ private struct GTFSStaticCachePayload: Codable {
             nextDirectionLabels[key] = entry.label
         }
 
+        var nextRouteNames: [String: GTFSRouteName] = [:]
+        for entry in routeNames {
+            nextRouteNames[entry.route] = GTFSRouteName(
+                shortName: entry.shortName,
+                longName: entry.longName
+            )
+        }
+
         var nextRouteStyles: [String: GTFSRouteStyle] = [:]
         for entry in routeStyles {
             nextRouteStyles[entry.route] = GTFSRouteStyle(
@@ -545,6 +601,7 @@ private struct GTFSStaticCachePayload: Codable {
             shapeCoordinatesByID: nextShapeCoordinates,
             routeShapeIDsByKey: nextRouteShapeIDs,
             routeDirectionLabels: nextDirectionLabels,
+            routeNamesByRouteID: nextRouteNames,
             routeStylesByRouteID: nextRouteStyles,
             feedInfo: feedInfo
         )
@@ -571,17 +628,17 @@ actor LiveGTFSRepository: GTFSRepository {
     private let persistedCacheDirectory: URL
     private let session: URLSession
     private let userDefaults: UserDefaults
-    private let cacheSchemaVersion = 3
+    private let cacheSchemaVersion = 4
     private let staleRevalidationInterval: TimeInterval = 24 * 60 * 60
     private var cachedData: GTFSStaticData?
     private var refreshTask: Task<Void, Never>?
 
     private var payloadURL: URL {
-        persistedCacheDirectory.appendingPathComponent("static_data_v3.plist")
+        persistedCacheDirectory.appendingPathComponent("static_data_v4.plist")
     }
 
     private var manifestURL: URL {
-        persistedCacheDirectory.appendingPathComponent("manifest_v3.plist")
+        persistedCacheDirectory.appendingPathComponent("manifest_v4.plist")
     }
 
     init(
@@ -787,6 +844,7 @@ actor LiveGTFSRepository: GTFSRepository {
                     shapeCoordinatesByID: data.shapeCoordinatesByID,
                     routeShapeIDsByKey: data.routeShapeIDsByKey,
                     routeDirectionLabels: data.routeDirectionLabels,
+                    routeNamesByRouteID: data.routeNamesByRouteID,
                     routeStylesByRouteID: data.routeStylesByRouteID,
                     feedInfo: feedInfo
                 )
@@ -929,7 +987,9 @@ actor LiveGTFSRepository: GTFSRepository {
         let stopTimesText = try String(contentsOf: stopTimesURL, encoding: .utf8)
 
         let trips = GTFSParsers.parseTrips(tripsText)
-        let routeStylesByRouteID = routesText.map(GTFSParsers.parseRouteStyles) ?? [:]
+        let routeCatalog = routesText.map(GTFSParsers.parseRouteCatalog) ?? .empty
+        let routeStylesByRouteID = routeCatalog.stylesByRouteID
+        let routeNamesByRouteID = routeCatalog.namesByRouteID
         let shapesByID = GTFSParsers.parseShapes(shapesText)
         let stopsByID = GTFSParsers.parseStops(stopsText)
         let routeStopSchedules = GTFSParsers.parseRouteStopSchedules(
@@ -969,6 +1029,7 @@ actor LiveGTFSRepository: GTFSRepository {
             shapeCoordinatesByID: shapeCoordinatesByID,
             routeShapeIDsByKey: routeShapeIDsByKey,
             routeDirectionLabels: trips.directionLabelByRoute,
+            routeNamesByRouteID: routeNamesByRouteID,
             routeStylesByRouteID: routeStylesByRouteID,
             feedInfo: feedInfoText.flatMap(GTFSParsers.parseFeedInfo)
         )

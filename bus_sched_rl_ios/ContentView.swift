@@ -47,8 +47,8 @@ struct MarkerScalePolicy {
     static let `default` = MarkerScalePolicy(
         minAltitude: 250,
         maxAltitude: 24_000,
-        minScale: 0.7,
-        maxScale: 1.45,
+        minScale: 0.35,
+        maxScale: 0.725,
         selectedScaleBoost: 1.1,
         scaleUpdateThreshold: 0.01,
         animationDuration: 0.2
@@ -273,6 +273,7 @@ struct ContentView: View {
 
     @StateObject private var vm = BusMapViewModel()
     @StateObject private var locationService = LocationService()
+    @StateObject private var searchVM = SearchViewModel()
 
     @AppStorage("onboarding.locationPriming.completed") private var hasCompletedLocationPriming = false
     @AppStorage("onboarding.locationPermissionRequested") private var hasRequestedLocationPermission = false
@@ -301,6 +302,8 @@ struct ContentView: View {
     @State private var liveRefreshSuccessCount = 0
     @State private var hasRestoredRouteSelection = false
     @State private var lastMapPersistAt = Date.distantPast
+    @State private var searchSheetDetent: PresentationDetent = .medium
+    @FocusState private var isSearchFieldFocused: Bool
 
     private let markerScalePolicy = MarkerScalePolicy.default
     private let stopMarkerMaxVisibleDistance: CLLocationDistance = 5_500
@@ -356,7 +359,8 @@ struct ContentView: View {
                     ForEach(vm.displayedVehicles) { vehicle in
                         Annotation(vehicle.route ?? "Bus", coordinate: vehicle.coord) {
                             BusMarkerView(
-                                title: markerText(for: vehicle),
+                                routeText: markerRouteText(for: vehicle),
+                                directionText: markerDirectionText(for: vehicle),
                                 heading: vehicle.heading,
                                 fillColor: markerFillColor(for: vehicle),
                                 strokeColor: markerStrokeColor(for: vehicle),
@@ -397,13 +401,11 @@ struct ContentView: View {
                         nextArrivalGlanceCard
 
                         HStack(alignment: .center, spacing: 10) {
-                            Spacer()
+                            searchEntryButton
                             if shouldShowLocateMeButton {
                                 locateMeButton
                                     .transition(.scale(scale: 0.92).combined(with: .opacity))
                             }
-                            liveToggleButton
-                            refreshButton
                         }
                         .animation(.easeInOut(duration: 0.2), value: shouldShowLocateMeButton)
                     }
@@ -442,10 +444,13 @@ struct ContentView: View {
             }
             .safeAreaInset(edge: .top) {
                 VStack(spacing: 8) {
-                    HStack(spacing: 8) {
-                        statusPill
-                        Spacer()
-                        liveStatusPill
+                    if vm.liveFeedStatusMessage == nil {
+                        HStack(spacing: 8) {
+//                            statusPill
+                            liveStatusPill
+                            Spacer()
+                            liveControlsComboBox
+                        }
                     }
 
                     if shouldShowLocationPermissionBanner {
@@ -453,17 +458,18 @@ struct ContentView: View {
                     }
 
                     if let liveFeedStatusMessage = vm.liveFeedStatusMessage {
-                        subtleStatusBanner(text: liveFeedStatusMessage)
+                        outageStatusBanner(text: liveFeedStatusMessage)
                     }
                 }
                 .padding(.horizontal, 12)
             }
         }
         .task {
-            restoreMapCameraIfNeeded()
+            searchVM.setSearchIndex(vm.searchIndex)
             vm.loadIfNeeded()
             vm.setScenePhase(scenePhase)
             handleLocationStartup()
+            configureStartupCamera()
         }
         .onChange(of: scenePhase) { _, newPhase in
             vm.setScenePhase(newPhase)
@@ -472,16 +478,13 @@ struct ContentView: View {
             handleLocationAuthorizationChange(newState)
             maybeShowCoachMarkTapBus()
         }
+        .onReceive(locationService.$location) { location in
+            searchVM.updateUserLocation(location)
+        }
         .onReceive(locationService.$location.compactMap { $0 }) { location in
             vm.updateUserLocation(location)
             if !didCenterToUser {
-                didCenterToUser = true
-                mapCamera = .region(
-                    MKCoordinateRegion(
-                        center: location,
-                        span: MKCoordinateSpan(latitudeDelta: 0.03, longitudeDelta: 0.03)
-                    )
-                )
+                centerMapOnUser(location)
             }
             maybeShowCoachMarkTapBus()
         }
@@ -514,6 +517,23 @@ struct ContentView: View {
             liveRefreshSuccessCount += 1
             maybeShowCoachMarkPauseLive()
         }
+        .onReceive(vm.$searchIndex) { index in
+            searchVM.setSearchIndex(index)
+        }
+        .onChange(of: searchVM.selectedResult) { _, selectedResult in
+            guard let selectedResult else { return }
+            handleSearchSelection(selectedResult)
+            searchVM.clearSelection()
+        }
+        .sheet(
+            isPresented: searchSheetPresentedBinding,
+            onDismiss: {
+                searchVM.dismiss(clearQuery: false)
+                isSearchFieldFocused = false
+            }
+        ) {
+            searchSheet
+        }
         .sheet(item: activeSheetBinding) { route in
             sheetView(for: route)
         }
@@ -532,6 +552,317 @@ struct ContentView: View {
                 activeSheet = next
             }
         )
+    }
+
+    private var searchSheetPresentedBinding: Binding<Bool> {
+        Binding(
+            get: { searchVM.isPresented },
+            set: { isPresented in
+                if isPresented {
+                    searchVM.present()
+                } else {
+                    searchVM.dismiss(clearQuery: false)
+                    isSearchFieldFocused = false
+                }
+            }
+        )
+    }
+
+    private var searchEntryButton: some View {
+        Button {
+            activeSheet = nil
+            searchSheetDetent = .medium
+            searchVM.present()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.headline.weight(.semibold))
+                Text("Search routes and stops")
+                    .font(.headline.weight(.semibold))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 16)
+            .frame(minWidth: 200, minHeight: 54)
+            .background(Color.blue, in: Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(Color.blue.opacity(0.35), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.14), radius: 4, x: 0, y: 2)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Search routes and stops")
+    }
+
+    private var searchSheet: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Search routes and stops", text: $searchVM.query)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .submitLabel(.search)
+                        .focused($isSearchFieldFocused)
+                        .accessibilityLabel("Search routes and stops")
+                }
+                .padding(.horizontal, 12)
+                .frame(minHeight: 44)
+                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                Button("Cancel") {
+                    searchVM.dismiss(clearQuery: true)
+                    isSearchFieldFocused = false
+                }
+                .font(.body.weight(.semibold))
+                .frame(minHeight: 44)
+                .accessibilityLabel("Cancel search")
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 10)
+
+            Divider()
+
+            Group {
+                if !searchVM.hasSearchIndex {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text("Route data is loading — try again in a moment")
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(.horizontal, 28)
+                } else if searchVM.isQueryEmpty {
+                    List {
+                        Section("Routes near you") {
+                            if locationService.location == nil {
+                                Text("Enable location in Settings to see nearby routes.")
+                                    .font(.body)
+                                    .foregroundStyle(.secondary)
+                                    .frame(minHeight: 44, alignment: .leading)
+                            } else if searchVM.nearbyRoutes.isEmpty {
+                                Text("No nearby routes right now.")
+                                    .font(.body)
+                                    .foregroundStyle(.secondary)
+                                    .frame(minHeight: 44, alignment: .leading)
+                            } else {
+                                ForEach(searchVM.nearbyRoutes) { match in
+                                    routeSearchRow(match, isNearbySuggestion: true)
+                                }
+                            }
+                        }
+                    }
+                    .listStyle(.plain)
+                } else if searchVM.isSearching {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text("Finding routes…")
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if searchVM.results.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.title2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text("No routes found")
+                            .font(.title3.weight(.bold))
+                            .foregroundStyle(.primary)
+                        Text("Try a route number like 24, a street like Sherbrooke, or a stop name like Berri-UQAM")
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(.horizontal, 28)
+                } else {
+                    List {
+                        let routeMatches = searchVM.results.compactMap { result -> RouteSearchMatch? in
+                            if case .route(let route) = result {
+                                return route
+                            }
+                            return nil
+                        }
+                        let stopMatches = searchVM.results.compactMap { result -> StopSearchMatch? in
+                            if case .stop(let stop) = result {
+                                return stop
+                            }
+                            return nil
+                        }
+
+                        if !routeMatches.isEmpty {
+                            Section("Routes") {
+                                ForEach(routeMatches) { match in
+                                    routeSearchRow(match, isNearbySuggestion: false)
+                                }
+                            }
+                        }
+
+                        if !stopMatches.isEmpty {
+                            Section("Stops") {
+                                ForEach(stopMatches) { match in
+                                    stopSearchRow(match, isNearbySuggestion: false)
+                                }
+                            }
+                        }
+                    }
+                    .listStyle(.plain)
+                    .animation(.easeInOut(duration: 0.2), value: searchVM.results)
+                }
+            }
+        }
+        .presentationDetents([.medium, .large], selection: $searchSheetDetent)
+        .presentationDragIndicator(.visible)
+        .onAppear {
+            searchSheetDetent = .medium
+            DispatchQueue.main.async {
+                isSearchFieldFocused = true
+            }
+        }
+        .onChange(of: isSearchFieldFocused) { _, focused in
+            if focused {
+                searchSheetDetent = .large
+            }
+        }
+        .accessibilityAddTraits(.isModal)
+    }
+
+    private func routeSearchRow(_ match: RouteSearchMatch, isNearbySuggestion: Bool) -> some View {
+        Button {
+            searchVM.select(.route(match))
+        } label: {
+            HStack(alignment: .center, spacing: 12) {
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(routeChipColor(hex: match.route.routeColor))
+                    .frame(width: 10, height: 34)
+                    .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(match.route.routeShortName)
+                        .font(.title2.weight(.bold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    if let direction = match.directionText?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       !direction.isEmpty {
+                        Text(direction)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+
+                Spacer(minLength: 8)
+
+                if isNearbySuggestion, let distanceText = distanceText(for: match.distanceMeters) {
+                    Text(distanceText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(minHeight: 44, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(routeAccessibilityLabel(for: match, isNearbySuggestion: isNearbySuggestion))
+    }
+
+    private func stopSearchRow(_ match: StopSearchMatch, isNearbySuggestion: Bool) -> some View {
+        Button {
+            searchVM.select(.stop(match))
+        } label: {
+            HStack(alignment: .center, spacing: 12) {
+                Image(systemName: "mappin.fill")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 14)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(match.stop.stopName)
+                        .font(.headline.weight(.bold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+
+                    if !match.stop.nearbyRouteIds.isEmpty {
+                        HStack(spacing: 4) {
+                            ForEach(Array(match.stop.nearbyRouteIds.prefix(4)), id: \.self) { routeID in
+                                Text(routeID)
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color(.secondarySystemBackground), in: Capsule())
+                            }
+                        }
+                    }
+                }
+
+                Spacer(minLength: 8)
+
+                if isNearbySuggestion, let distanceText = distanceText(for: match.distanceMeters) {
+                    Text(distanceText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(minHeight: 44, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(stopAccessibilityLabel(for: match, isNearbySuggestion: isNearbySuggestion))
+    }
+
+    private func routeChipColor(hex: String?) -> Color {
+        guard let hex else { return .blue }
+        let normalized = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "#", with: "")
+            .uppercased()
+        guard normalized.count == 6, let value = Int(normalized, radix: 16) else {
+            return .blue
+        }
+
+        let red = Double((value >> 16) & 0xFF) / 255.0
+        let green = Double((value >> 8) & 0xFF) / 255.0
+        let blue = Double(value & 0xFF) / 255.0
+        return Color(red: red, green: green, blue: blue)
+    }
+
+    private func distanceText(for meters: Int?) -> String? {
+        guard let meters else { return nil }
+        if meters >= 1000 {
+            let kilometers = Double(meters) / 1000
+            return String(format: "%.1f km", kilometers)
+        }
+        return "\(meters) m"
+    }
+
+    private func routeAccessibilityLabel(for match: RouteSearchMatch, isNearbySuggestion: Bool) -> String {
+        var chunks: [String] = ["Route \(match.route.routeShortName)"]
+        if let direction = match.directionText?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !direction.isEmpty {
+            chunks.append(direction)
+        }
+        if isNearbySuggestion, let distance = distanceText(for: match.distanceMeters) {
+            chunks.append(distance)
+        }
+        return chunks.joined(separator: ", ")
+    }
+
+    private func stopAccessibilityLabel(for match: StopSearchMatch, isNearbySuggestion: Bool) -> String {
+        var chunks: [String] = ["Stop \(match.stop.stopName)"]
+        if !match.stop.nearbyRouteIds.isEmpty {
+            let routes = match.stop.nearbyRouteIds.joined(separator: ", ")
+            chunks.append("serving routes \(routes)")
+        }
+        if isNearbySuggestion, let distance = distanceText(for: match.distanceMeters) {
+            chunks.append(distance)
+        }
+        return chunks.joined(separator: ", ")
     }
 
     @ViewBuilder
@@ -675,43 +1006,52 @@ struct ContentView: View {
         }
     }
 
-    private var refreshButton: some View {
-        Button {
-            vm.refreshLiveBuses()
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: vm.isRefreshing ? "arrow.clockwise.circle.fill" : "arrow.clockwise")
-                Text(vm.isRefreshing ? "Refreshing" : "Refresh")
+    private var liveControlsComboBox: some View {
+        HStack(spacing: 0) {
+            Button {
+                vm.toggleLiveUpdatesPaused()
+            } label: {
+                Image(systemName: vm.isLiveUpdatesPaused ? "play.fill" : "pause.fill")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(vm.isLiveUpdatesPaused ? Color.gray : Color.green)
+                    .frame(width: 44, height: 44)
+                    .overlay(
+                        Circle()
+                            .stroke(
+                                Color.yellow.opacity(activeCoachMark == .pauseLive ? 0.95 : 0),
+                                lineWidth: 2.6
+                            )
+                            .padding(4)
+                    )
             }
-            .font(.subheadline.weight(.semibold))
-            .foregroundStyle(.primary)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .background(.ultraThinMaterial, in: Capsule())
-        }
-        .buttonStyle(.plain)
-        .disabled(vm.isRefreshing)
-    }
+            .buttonStyle(.plain)
+            .accessibilityLabel(vm.isLiveUpdatesPaused ? "Resume live tracking" : "Pause live tracking")
 
-    private var liveToggleButton: some View {
-        Button {
-            vm.toggleLiveUpdatesPaused()
-        } label: {
-            Image(systemName: vm.isLiveUpdatesPaused ? "play.fill" : "pause.fill")
-                .font(.subheadline.weight(.bold))
-                .foregroundStyle(vm.isLiveUpdatesPaused ? Color.gray : Color.green)
-                .frame(width: 44, height: 44)
-                .background(.ultraThinMaterial, in: Circle())
-                .overlay(
-                    Circle()
-                        .stroke(
-                            Color.yellow.opacity(activeCoachMark == .pauseLive ? 0.95 : 0),
-                            lineWidth: 2.6
-                        )
-                )
+            Rectangle()
+                .fill(Color.primary.opacity(0.2))
+                .frame(width: 1, height: 24)
+
+            Button {
+                vm.refreshLiveBuses()
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(.primary)
+                    .rotationEffect(.degrees(vm.isRefreshing ? 360 : 0))
+                    .animation(
+                        vm.isRefreshing
+                        ? .linear(duration: 0.8).repeatForever(autoreverses: false)
+                        : .default,
+                        value: vm.isRefreshing
+                    )
+                    .frame(width: 44, height: 44)
+            }
+            .buttonStyle(.plain)
+            .disabled(vm.isRefreshing)
+            .accessibilityLabel("Refresh live buses")
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(vm.isLiveUpdatesPaused ? "Resume live tracking" : "Pause live tracking")
+        .padding(.horizontal, 4)
+        .background(.ultraThinMaterial, in: Capsule())
     }
 
     private var visibleStopAnnotations: [MapStopPresentation] {
@@ -745,7 +1085,7 @@ struct ContentView: View {
             Image(systemName: "location.fill")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.primary)
-                .frame(width: 44, height: 44)
+                .frame(width: 54, height: 54)
                 .background(.ultraThinMaterial, in: Circle())
         }
         .buttonStyle(.plain)
@@ -1290,20 +1630,28 @@ struct ContentView: View {
         .background(Color.orange.opacity(0.15), in: Capsule())
     }
 
-    private func subtleStatusBanner(text: String) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "antenna.radiowaves.left.and.right.slash")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+    private func outageStatusBanner(text: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.subheadline.weight(.bold))
+                .foregroundStyle(.white)
             Text(text)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.primary)
-                .lineLimit(1)
+                .font(.subheadline.weight(.bold))
+                .foregroundStyle(.white)
+                .lineLimit(2)
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.ultraThinMaterial, in: Capsule())
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            Color.red.opacity(0.92),
+            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.white.opacity(0.35), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.28), radius: 6, x: 0, y: 3)
     }
 
     private var locationPrimingOverlay: some View {
@@ -1544,9 +1892,12 @@ struct ContentView: View {
         return chunks.joined(separator: " • ")
     }
 
-    private func markerText(for vehicle: VehiclePosition) -> String {
-        let route = vehicle.route ?? "--"
-        return "\(route) \(vm.directionText(for: vehicle))"
+    private func markerRouteText(for vehicle: VehiclePosition) -> String {
+        vehicle.route ?? "--"
+    }
+
+    private func markerDirectionText(for vehicle: VehiclePosition) -> String {
+        vm.directionText(for: vehicle)
     }
 
     private func nextBusSupplementalLine(for glance: NextBusGlance) -> String {
@@ -1743,6 +2094,76 @@ struct ContentView: View {
         vm.refreshSuggestionsForCurrentState()
     }
 
+    private func handleSearchSelection(_ selectedResult: SearchResult) {
+        searchVM.dismiss(clearQuery: true)
+        isSearchFieldFocused = false
+
+        guard let response = vm.applySearchSelection(selectedResult) else { return }
+        switch response {
+        case .route(let shape, let detail):
+            centerMapOnRoute(shape)
+            if let detail {
+                activeSheet = .routeDetail(detail)
+            }
+        case .stop(let coordinate, let arrivals):
+            centerMapOnCoordinate(coordinate)
+            if let arrivals {
+                activeSheet = .stopArrivals(arrivals)
+            }
+        }
+    }
+
+    private func centerMapOnRoute(_ coordinates: [CLLocationCoordinate2D]) {
+        guard !coordinates.isEmpty else { return }
+
+        var minLatitude = coordinates[0].latitude
+        var maxLatitude = coordinates[0].latitude
+        var minLongitude = coordinates[0].longitude
+        var maxLongitude = coordinates[0].longitude
+
+        for coordinate in coordinates.dropFirst() {
+            minLatitude = min(minLatitude, coordinate.latitude)
+            maxLatitude = max(maxLatitude, coordinate.latitude)
+            minLongitude = min(minLongitude, coordinate.longitude)
+            maxLongitude = max(maxLongitude, coordinate.longitude)
+        }
+
+        let center = CLLocationCoordinate2D(
+            latitude: (minLatitude + maxLatitude) / 2,
+            longitude: (minLongitude + maxLongitude) / 2
+        )
+        let latitudeDelta = max((maxLatitude - minLatitude) * 1.35, 0.01)
+        let longitudeDelta = max((maxLongitude - minLongitude) * 1.35, 0.01)
+
+        didCenterToUser = true
+        mapCamera = .region(
+            MKCoordinateRegion(
+                center: center,
+                span: MKCoordinateSpan(latitudeDelta: latitudeDelta, longitudeDelta: longitudeDelta)
+            )
+        )
+    }
+
+    private func centerMapOnCoordinate(_ coordinate: CLLocationCoordinate2D) {
+        didCenterToUser = true
+        mapCamera = .region(
+            MKCoordinateRegion(
+                center: coordinate,
+                span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
+            )
+        )
+    }
+
+    private func centerMapOnUser(_ coordinate: CLLocationCoordinate2D) {
+        didCenterToUser = true
+        mapCamera = .region(
+            MKCoordinateRegion(
+                center: coordinate,
+                span: MKCoordinateSpan(latitudeDelta: 0.03, longitudeDelta: 0.03)
+            )
+        )
+    }
+
     private func handleBusTap(_ vehicle: VehiclePosition) {
         vm.selectBus(vehicle)
         maybeShowCoachMarkNearbyArrivals()
@@ -1765,6 +2186,24 @@ struct ContentView: View {
             }
         case .denied, .restricted:
             showLocationPriming = false
+            searchVM.updateUserLocation(nil)
+        }
+    }
+
+    private func configureStartupCamera() {
+        let decision = LaunchCameraPolicy.decision(
+            currentLocationAvailable: locationService.location != nil,
+            hasPersistedCamera: hasPersistedMapCamera
+        )
+
+        switch decision {
+        case .centerOnUser:
+            guard let userLocation = locationService.location else { return }
+            centerMapOnUser(userLocation)
+        case .restorePersisted:
+            restoreMapCameraIfNeeded()
+        case .none:
+            break
         }
     }
 
@@ -1780,6 +2219,7 @@ struct ContentView: View {
             }
         case .denied, .restricted:
             showLocationPriming = false
+            searchVM.updateUserLocation(nil)
         }
     }
 
@@ -1800,7 +2240,6 @@ struct ContentView: View {
         )
         mapCenterCoordinate = center
         mapCameraDistance = persistedMapCameraDistance
-        didCenterToUser = true
     }
 
     private func persistMapCameraIfNeeded(center: CLLocationCoordinate2D, distance: CLLocationDistance) {
