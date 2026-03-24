@@ -106,6 +106,65 @@ struct NearbyETAComposer {
             scope: scope
         )
 
+        return buildCards(
+            staticData: staticData,
+            index: index,
+            liveArrivals: liveArrivals,
+            vehiclesByRouteKey: vehiclesByRouteKey,
+            userLocation: userLocation,
+            candidates: candidates,
+            referenceDate: referenceDate,
+            sortsByETA: true,
+            maxCount: maxCards
+        )
+    }
+
+    func composeFavoriteCards(
+        staticData: GTFSStaticData,
+        index: TransitDataIndex,
+        snapshot: RealtimeSnapshot,
+        userLocation: CLLocationCoordinate2D?,
+        favorites: [FavoriteArrivalID],
+        referenceDate: Date = Date()
+    ) -> [NearbyETACard] {
+        let liveArrivals = buildLiveArrivalLookup(
+            staticData: staticData,
+            index: index,
+            snapshot: snapshot,
+            referenceDate: referenceDate
+        )
+        let vehiclesByRouteKey = buildVehiclesByRouteKey(snapshot.vehicles)
+        let candidates = favorites.map { favorite in
+            (
+                routeKey: RouteKey(route: favorite.routeID, direction: favorite.directionID),
+                stopID: favorite.stopID
+            )
+        }
+
+        return buildCards(
+            staticData: staticData,
+            index: index,
+            liveArrivals: liveArrivals,
+            vehiclesByRouteKey: vehiclesByRouteKey,
+            userLocation: userLocation,
+            candidates: candidates,
+            referenceDate: referenceDate,
+            sortsByETA: false,
+            maxCount: nil
+        )
+    }
+
+    private func buildCards(
+        staticData: GTFSStaticData,
+        index: TransitDataIndex,
+        liveArrivals: [RouteKey: [String: LiveArrivalMatch]],
+        vehiclesByRouteKey: [RouteKey: [VehiclePosition]],
+        userLocation: CLLocationCoordinate2D?,
+        candidates: [(routeKey: RouteKey, stopID: String)],
+        referenceDate: Date,
+        sortsByETA: Bool,
+        maxCount: Int?
+    ) -> [NearbyETACard] {
         var cards: [NearbyETACard] = []
         var seenCardIDs: Set<String> = []
         cards.reserveCapacity(candidates.count)
@@ -176,33 +235,38 @@ struct NearbyETAComposer {
             )
         }
 
-        cards.sort { lhs, rhs in
-            let lhsETA = lhs.etaMinutes ?? Int.max
-            let rhsETA = rhs.etaMinutes ?? Int.max
-            if lhsETA != rhsETA {
-                return lhsETA < rhsETA
-            }
+        if sortsByETA {
+            cards.sort { lhs, rhs in
+                let lhsETA = lhs.etaMinutes ?? Int.max
+                let rhsETA = rhs.etaMinutes ?? Int.max
+                if lhsETA != rhsETA {
+                    return lhsETA < rhsETA
+                }
 
-            let lhsDistance = lhs.distanceMeters ?? Int.max
-            let rhsDistance = rhs.distanceMeters ?? Int.max
-            if lhsDistance != rhsDistance {
-                return lhsDistance < rhsDistance
-            }
+                let lhsDistance = lhs.distanceMeters ?? Int.max
+                let rhsDistance = rhs.distanceMeters ?? Int.max
+                if lhsDistance != rhsDistance {
+                    return lhsDistance < rhsDistance
+                }
 
-            let routeComparison = lhs.routeShortName.localizedStandardCompare(rhs.routeShortName)
-            if routeComparison != .orderedSame {
-                return routeComparison == .orderedAscending
-            }
+                let routeComparison = lhs.routeShortName.localizedStandardCompare(rhs.routeShortName)
+                if routeComparison != .orderedSame {
+                    return routeComparison == .orderedAscending
+                }
 
-            let stopComparison = lhs.stopName.localizedStandardCompare(rhs.stopName)
-            if stopComparison != .orderedSame {
-                return stopComparison == .orderedAscending
-            }
+                let stopComparison = lhs.stopName.localizedStandardCompare(rhs.stopName)
+                if stopComparison != .orderedSame {
+                    return stopComparison == .orderedAscending
+                }
 
-            return lhs.directionText.localizedStandardCompare(rhs.directionText) == .orderedAscending
+                return lhs.directionText.localizedStandardCompare(rhs.directionText) == .orderedAscending
+            }
         }
 
-        return Array(cards.prefix(maxCards))
+        if let maxCount {
+            return Array(cards.prefix(maxCount))
+        }
+        return cards
     }
 
     private func candidatePairs(

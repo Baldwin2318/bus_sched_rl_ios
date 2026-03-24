@@ -12,28 +12,77 @@ struct ContentView: View {
             ZStack {
                 NearbyETATheme.background.ignoresSafeArea()
 
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 14) {
+                List {
+                    Section {
                         header
+                            .listRowStyling()
+
                         searchBar
+                            .listRowStyling()
 
                         if shouldShowLocationBanner {
                             locationBanner
+                                .listRowStyling()
                         }
 
                         if let liveStatusMessage = viewModel.liveStatusMessage {
                             statusBanner(text: liveStatusMessage, tint: .orange)
+                                .listRowStyling()
                         }
 
                         if !viewModel.searchResults.isEmpty {
                             searchResultsPanel
+                                .listRowStyling()
+                                .accessibilityIdentifier("search-results-section")
                         }
-
-                        cardsSection
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 18)
+
+                    if !viewModel.favoriteCards.isEmpty {
+                        Section {
+                            ForEach(viewModel.favoriteCards) { card in
+                                cardLink(card)
+                                    .listRowStyling()
+                            }
+                        } header: {
+                            sectionHeader(
+                                title: "Favorites",
+                                count: viewModel.favoriteCards.count
+                            )
+                        }
+                    }
+
+                    Section {
+                        switch viewModel.phase {
+                        case .idle, .loading where viewModel.nearbyCards.isEmpty:
+                            loadingPanel
+                                .listRowStyling()
+                        case .error(let message):
+                            statusBanner(text: message, tint: .red)
+                                .listRowStyling()
+                        case .ready, .loading, .idle:
+                            if viewModel.nearbyCards.isEmpty {
+                                emptyStatePanel
+                                    .listRowStyling()
+                            } else {
+                                ForEach(viewModel.nearbyCards) { card in
+                                    cardLink(card)
+                                        .listRowStyling()
+                                }
+                            }
+                        }
+                    } header: {
+                        sectionHeader(
+                            title: viewModel.titleText,
+                            count: viewModel.nearbyCards.isEmpty ? nil : viewModel.nearbyCards.count,
+                            subtitle: viewModel.lastUpdatedAt.map {
+                                "Updated \($0.formatted(date: .omitted, time: .shortened))"
+                            }
+                        )
+                    }
                 }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .contentMargins(.horizontal, 16, for: .scrollContent)
                 .refreshable {
                     viewModel.refreshManually()
                 }
@@ -214,50 +263,56 @@ struct ContentView: View {
         )
     }
 
-    private var cardsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(viewModel.titleText)
-                        .font(.title3.weight(.semibold))
-                    if let lastUpdatedAt = viewModel.lastUpdatedAt {
-                        Text("Updated \(lastUpdatedAt.formatted(date: .omitted, time: .shortened))")
-                            .font(.caption)
-                            .foregroundStyle(NearbyETATheme.secondaryText)
-                    }
-                }
-                Spacer(minLength: 12)
-                if !viewModel.cards.isEmpty {
-                    Text("\(viewModel.cards.count)")
-                        .font(.subheadline.weight(.semibold))
+    private func cardLink(_ card: NearbyETACard) -> some View {
+        NavigationLink {
+            ArrivalDetailView(
+                viewModel: viewModel,
+                locationService: locationService,
+                initialCard: card
+            )
+        } label: {
+            ETACardView(card: card, showsDisclosureIndicator: true)
+        }
+        .buttonStyle(.plain)
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button {
+                viewModel.toggleFavorite(card)
+            } label: {
+                Label(
+                    viewModel.isFavorite(card) ? "Remove Favorite" : "Save Favorite",
+                    systemImage: viewModel.isFavorite(card) ? "star.slash" : "star.fill"
+                )
+            }
+            .tint(.yellow)
+        }
+    }
+
+    private func sectionHeader(
+        title: String,
+        count: Int? = nil,
+        subtitle: String? = nil
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.title3.weight(.semibold))
+                    .textCase(nil)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.caption)
                         .foregroundStyle(NearbyETATheme.secondaryText)
+                        .textCase(nil)
                 }
             }
-
-            switch viewModel.phase {
-            case .idle, .loading where viewModel.cards.isEmpty:
-                loadingPanel
-            case .error(let message):
-                statusBanner(text: message, tint: .red)
-            case .ready, .loading, .idle:
-                if viewModel.cards.isEmpty {
-                    emptyStatePanel
-                } else {
-                    ForEach(viewModel.cards) { card in
-                        NavigationLink {
-                            ArrivalDetailView(
-                                viewModel: viewModel,
-                                locationService: locationService,
-                                initialCard: card
-                            )
-                        } label: {
-                            ETACardView(card: card, showsDisclosureIndicator: true)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
+            Spacer(minLength: 12)
+            if let count {
+                Text("\(count)")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(NearbyETATheme.secondaryText)
+                    .textCase(nil)
             }
         }
+        .padding(.top, 8)
     }
 
     private var loadingPanel: some View {
@@ -315,6 +370,15 @@ struct ContentView: View {
         default:
             return "Try a different route or stop, or refresh to pull the latest realtime data."
         }
+    }
+}
+
+private extension View {
+    func listRowStyling() -> some View {
+        self
+            .listRowInsets(EdgeInsets(top: 7, leading: 0, bottom: 7, trailing: 0))
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
     }
 }
 

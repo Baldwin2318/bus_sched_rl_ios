@@ -298,6 +298,211 @@ final class NearbyETAViewModelTests: XCTestCase {
         XCTAssertGreaterThan(mapModel.routeLine.pointCount, 2)
     }
 
+    func testFavoritingCardPinsItAndRemovesItFromNearbyList() async throws {
+        let routeKey = RouteKey(route: "55", direction: "0")
+        let stop = BusStop(
+            id: "stop-1",
+            name: "Main Stop",
+            coord: CLLocationCoordinate2D(latitude: 45.50, longitude: -73.60)
+        )
+        let staticData = GTFSStaticData(
+            routeStops: [routeKey: [stop]],
+            routeStopSchedules: [
+                routeKey: [
+                    RouteStopSchedule(
+                        stop: stop,
+                        sequence: 1,
+                        scheduledArrival: "08:00:00",
+                        scheduledDeparture: nil
+                    )
+                ]
+            ],
+            routeDirectionLabels: [routeKey: "Nord"],
+            routeNamesByRouteID: ["55": GTFSRouteName(shortName: "55", longName: "Mock Route")],
+            routeStylesByRouteID: [:],
+            feedInfo: nil
+        )
+        let now = Date()
+        let snapshot = RealtimeSnapshot(
+            vehicles: [],
+            tripUpdates: [
+                TripUpdatePayload(
+                    tripID: "trip-1",
+                    routeID: "55",
+                    directionID: 0,
+                    vehicleID: nil,
+                    timestamp: now,
+                    stopTimeUpdates: [
+                        TripStopTimeUpdate(
+                            stopID: "stop-1",
+                            stopSequence: 1,
+                            arrivalTime: now.addingTimeInterval(4 * 60),
+                            departureTime: nil
+                        )
+                    ]
+                )
+            ]
+        )
+        let favoritesRepository = InMemoryFavoritesRepository()
+        let viewModel = NearbyETAViewModel(
+            gtfsRepository: StaticRepository(staticData: staticData),
+            realtimeRepository: SnapshotRepository(snapshot: snapshot),
+            favoritesRepository: favoritesRepository,
+            livePollInterval: .seconds(120)
+        )
+
+        viewModel.updateUserLocation(CLLocationCoordinate2D(latitude: 45.5001, longitude: -73.6001))
+        viewModel.loadIfNeeded()
+
+        try await waitUntil { !viewModel.nearbyCards.isEmpty }
+        let card = try XCTUnwrap(viewModel.nearbyCards.first)
+
+        viewModel.toggleFavorite(card)
+
+        XCTAssertEqual(viewModel.favoriteCards.map(\.id), [card.id])
+        XCTAssertFalse(viewModel.nearbyCards.contains(where: { $0.id == card.id }))
+        XCTAssertEqual(favoritesRepository.loadFavorites(), [FavoriteArrivalID(card: card)])
+    }
+
+    func testFavoriteCardRefreshesEtaOverTime() async throws {
+        let routeKey = RouteKey(route: "55", direction: "0")
+        let stop = BusStop(
+            id: "stop-1",
+            name: "Main Stop",
+            coord: CLLocationCoordinate2D(latitude: 45.50, longitude: -73.60)
+        )
+        let staticData = GTFSStaticData(
+            routeStops: [routeKey: [stop]],
+            routeStopSchedules: [
+                routeKey: [
+                    RouteStopSchedule(
+                        stop: stop,
+                        sequence: 1,
+                        scheduledArrival: "08:00:00",
+                        scheduledDeparture: nil
+                    )
+                ]
+            ],
+            routeDirectionLabels: [routeKey: "Nord"],
+            routeNamesByRouteID: ["55": GTFSRouteName(shortName: "55", longName: "Mock Route")],
+            routeStylesByRouteID: [:],
+            feedInfo: nil
+        )
+        let now = Date()
+        let repository = MutableSnapshotRepository(
+            snapshot: RealtimeSnapshot(
+                vehicles: [],
+                tripUpdates: [
+                    TripUpdatePayload(
+                        tripID: "trip-1",
+                        routeID: "55",
+                        directionID: 0,
+                        vehicleID: nil,
+                        timestamp: now,
+                        stopTimeUpdates: [
+                            TripStopTimeUpdate(
+                                stopID: "stop-1",
+                                stopSequence: 1,
+                                arrivalTime: now.addingTimeInterval(2 * 60),
+                                departureTime: nil
+                            )
+                        ]
+                    )
+                ]
+            )
+        )
+        let viewModel = NearbyETAViewModel(
+            gtfsRepository: StaticRepository(staticData: staticData),
+            realtimeRepository: repository,
+            favoritesRepository: InMemoryFavoritesRepository(),
+            livePollInterval: .seconds(120)
+        )
+
+        viewModel.updateUserLocation(CLLocationCoordinate2D(latitude: 45.5001, longitude: -73.6001))
+        viewModel.loadIfNeeded()
+
+        try await waitUntil { !viewModel.nearbyCards.isEmpty }
+        let card = try XCTUnwrap(viewModel.nearbyCards.first)
+        viewModel.toggleFavorite(card)
+        let initialETA = viewModel.favoriteCards.first?.etaMinutes
+
+        await repository.updateSnapshot(
+            RealtimeSnapshot(
+                vehicles: [],
+                tripUpdates: [
+                    TripUpdatePayload(
+                        tripID: "trip-1",
+                        routeID: "55",
+                        directionID: 0,
+                        vehicleID: nil,
+                        timestamp: now.addingTimeInterval(60),
+                        stopTimeUpdates: [
+                            TripStopTimeUpdate(
+                                stopID: "stop-1",
+                                stopSequence: 1,
+                                arrivalTime: now.addingTimeInterval(7 * 60),
+                                departureTime: nil
+                            )
+                        ]
+                    )
+                ]
+            )
+        )
+
+        viewModel.refreshManually()
+        try await waitUntil {
+            (viewModel.favoriteCards.first?.etaMinutes ?? -1) != (initialETA ?? -1)
+        }
+
+        XCTAssertEqual(viewModel.favoriteCards.first?.id, card.id)
+        XCTAssertNotEqual(viewModel.favoriteCards.first?.etaMinutes, initialETA)
+    }
+
+    func testMissingFavoriteIsIgnoredSafely() async throws {
+        let routeKey = RouteKey(route: "55", direction: "0")
+        let stop = BusStop(
+            id: "stop-1",
+            name: "Main Stop",
+            coord: CLLocationCoordinate2D(latitude: 45.50, longitude: -73.60)
+        )
+        let staticData = GTFSStaticData(
+            routeStops: [routeKey: [stop]],
+            routeStopSchedules: [
+                routeKey: [
+                    RouteStopSchedule(
+                        stop: stop,
+                        sequence: 1,
+                        scheduledArrival: "08:00:00",
+                        scheduledDeparture: nil
+                    )
+                ]
+            ],
+            routeDirectionLabels: [routeKey: "Nord"],
+            routeNamesByRouteID: ["55": GTFSRouteName(shortName: "55", longName: "Mock Route")],
+            routeStylesByRouteID: [:],
+            feedInfo: nil
+        )
+        let favoritesRepository = InMemoryFavoritesRepository(
+            favorites: [
+                FavoriteArrivalID(routeID: "99", directionID: "1", stopID: "missing-stop")
+            ]
+        )
+        let viewModel = NearbyETAViewModel(
+            gtfsRepository: StaticRepository(staticData: staticData),
+            realtimeRepository: SnapshotRepository(snapshot: RealtimeSnapshot(vehicles: [], tripUpdates: [])),
+            favoritesRepository: favoritesRepository,
+            livePollInterval: .seconds(120)
+        )
+
+        viewModel.updateUserLocation(CLLocationCoordinate2D(latitude: 45.5001, longitude: -73.6001))
+        viewModel.loadIfNeeded()
+
+        try await waitUntil { viewModel.phase == .ready }
+
+        XCTAssertTrue(viewModel.favoriteCards.isEmpty)
+        XCTAssertFalse(viewModel.nearbyCards.isEmpty)
+    }
+
     private func waitUntil(
         timeoutSeconds: TimeInterval = 2.0,
         condition: @escaping () -> Bool
@@ -342,5 +547,37 @@ private actor SnapshotRepository: RealtimeRepository {
 
     func fetchSnapshot() async throws -> RealtimeSnapshot {
         snapshot
+    }
+}
+
+private actor MutableSnapshotRepository: RealtimeRepository {
+    private var snapshot: RealtimeSnapshot
+
+    init(snapshot: RealtimeSnapshot) {
+        self.snapshot = snapshot
+    }
+
+    func updateSnapshot(_ snapshot: RealtimeSnapshot) {
+        self.snapshot = snapshot
+    }
+
+    func fetchSnapshot() async throws -> RealtimeSnapshot {
+        snapshot
+    }
+}
+
+private final class InMemoryFavoritesRepository: FavoritesRepository {
+    private var favorites: [FavoriteArrivalID]
+
+    init(favorites: [FavoriteArrivalID] = []) {
+        self.favorites = favorites
+    }
+
+    func loadFavorites() -> [FavoriteArrivalID] {
+        favorites
+    }
+
+    func saveFavorites(_ favorites: [FavoriteArrivalID]) {
+        self.favorites = favorites
     }
 }

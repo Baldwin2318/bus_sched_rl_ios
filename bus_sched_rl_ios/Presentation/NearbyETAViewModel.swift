@@ -17,6 +17,8 @@ final class NearbyETAViewModel: ObservableObject {
     }
 
     @Published private(set) var cards: [NearbyETACard] = []
+    @Published private(set) var favoriteCards: [NearbyETACard] = []
+    @Published private(set) var nearbyCards: [NearbyETACard] = []
     @Published private(set) var searchResults: [SearchResult] = []
     @Published private(set) var phase: NearbyETAPhase = .idle
     @Published private(set) var isRefreshing = false
@@ -27,6 +29,7 @@ final class NearbyETAViewModel: ObservableObject {
 
     private let gtfsRepository: GTFSRepository
     private let realtimeRepository: RealtimeRepository
+    private let favoritesRepository: FavoritesRepository
     private let composer = NearbyETAComposer()
     private let livePollInterval: Duration
     private let detailRefreshInterval: Duration = .seconds(10)
@@ -45,15 +48,20 @@ final class NearbyETAViewModel: ObservableObject {
     private var cardsTask: Task<Void, Never>?
     private var cardsGeneration = 0
     private var detailRefreshObservers = 0
+    private var favoriteIDs: [FavoriteArrivalID]
+    private var favoriteFallbackCardsByID: [String: NearbyETACard] = [:]
 
     init(
         gtfsRepository: GTFSRepository = LiveGTFSRepository(),
         realtimeRepository: RealtimeRepository = STMRealtimeRepository(),
+        favoritesRepository: FavoritesRepository = UserDefaultsFavoritesRepository(),
         livePollInterval: Duration = .seconds(30)
     ) {
         self.gtfsRepository = gtfsRepository
         self.realtimeRepository = realtimeRepository
+        self.favoritesRepository = favoritesRepository
         self.livePollInterval = livePollInterval
+        self.favoriteIDs = favoritesRepository.loadFavorites()
     }
 
     deinit {
@@ -172,7 +180,28 @@ final class NearbyETAViewModel: ObservableObject {
     }
 
     func cardDetail(for initialCard: NearbyETACard) -> NearbyETACard {
-        cards.first(where: { $0.id == initialCard.id }) ?? initialCard
+        favoriteCards.first(where: { $0.id == initialCard.id }) ??
+            cards.first(where: { $0.id == initialCard.id }) ??
+            initialCard
+    }
+
+    func isFavorite(_ card: NearbyETACard) -> Bool {
+        favoriteIDs.contains(FavoriteArrivalID(card: card))
+    }
+
+    func toggleFavorite(_ card: NearbyETACard) {
+        let favoriteID = FavoriteArrivalID(card: card)
+
+        if let index = favoriteIDs.firstIndex(of: favoriteID) {
+            favoriteIDs.remove(at: index)
+            favoriteFallbackCardsByID[favoriteID.id] = nil
+        } else {
+            favoriteIDs.append(favoriteID)
+            favoriteFallbackCardsByID[favoriteID.id] = card
+        }
+
+        favoritesRepository.saveFavorites(favoriteIDs)
+        rebuildPresentationLists(referenceDate: Date())
     }
 
     func liveVehicle(for card: NearbyETACard) -> VehiclePosition? {
@@ -328,6 +357,8 @@ final class NearbyETAViewModel: ObservableObject {
     private func refreshCards() {
         guard let staticData, let dataIndex else {
             cards = []
+            favoriteCards = []
+            nearbyCards = []
             return
         }
 
@@ -352,7 +383,40 @@ final class NearbyETAViewModel: ObservableObject {
             await MainActor.run {
                 guard self.cardsGeneration == generation else { return }
                 self.cards = cards
+                self.rebuildPresentationLists(referenceDate: Date())
             }
+        }
+    }
+
+    private func rebuildPresentationLists(referenceDate: Date) {
+        let resolvedFavoriteCards = resolveFavoriteCards(referenceDate: referenceDate)
+        let favoriteCardIDs = Set(resolvedFavoriteCards.map(\.id))
+
+        favoriteCards = resolvedFavoriteCards
+        nearbyCards = cards.filter { !favoriteCardIDs.contains($0.id) }
+    }
+
+    private func resolveFavoriteCards(referenceDate: Date) -> [NearbyETACard] {
+        guard let staticData, let dataIndex else {
+            return favoriteIDs.compactMap { favoriteFallbackCardsByID[$0.id] }
+        }
+
+        let resolvedCards = composer.composeFavoriteCards(
+            staticData: staticData,
+            index: dataIndex,
+            snapshot: snapshot,
+            userLocation: userLocation,
+            favorites: favoriteIDs,
+            referenceDate: referenceDate
+        )
+
+        for card in resolvedCards {
+            favoriteFallbackCardsByID[FavoriteArrivalID(card: card).id] = card
+        }
+
+        let resolvedByID = Dictionary(uniqueKeysWithValues: resolvedCards.map { (FavoriteArrivalID(card: $0).id, $0) })
+        return favoriteIDs.compactMap { favoriteID in
+            resolvedByID[favoriteID.id] ?? favoriteFallbackCardsByID[favoriteID.id]
         }
     }
 

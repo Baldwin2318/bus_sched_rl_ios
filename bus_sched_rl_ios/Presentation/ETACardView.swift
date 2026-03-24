@@ -64,11 +64,11 @@ struct ETACardView: View {
             }
             .frame(minWidth: 58)
 
-            if showsDisclosureIndicator {
-                Image(systemName: "chevron.right")
-                    .font(.headline.weight(.semibold))
-                    .foregroundStyle(NearbyETATheme.secondaryText)
-            }
+//            if showsDisclosureIndicator {
+//                Image(systemName: "chevron.right")
+//                    .font(.headline.weight(.semibold))
+//                    .foregroundStyle(NearbyETATheme.secondaryText)
+//            }
         }
         .padding(16)
         .background(
