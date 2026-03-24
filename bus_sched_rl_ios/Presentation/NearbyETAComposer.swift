@@ -1,6 +1,11 @@
 import Foundation
 import CoreLocation
 
+enum NearbyETAFeedMode: Equatable {
+    case standard
+    case scheduledList
+}
+
 struct LiveArrivalMatch: Equatable {
     let tripID: String
     let vehicleID: String?
@@ -91,19 +96,21 @@ struct NearbyETAComposer {
         snapshot: RealtimeSnapshot,
         userLocation: CLLocationCoordinate2D?,
         scope: NearbyETAScope,
+        feedMode: NearbyETAFeedMode = .standard,
         referenceDate: Date = Date()
     ) -> [NearbyETACard] {
-        let liveArrivals = buildLiveArrivalLookup(
+        let liveArrivals = feedMode == .standard ? buildLiveArrivalLookup(
             staticData: staticData,
             index: index,
             snapshot: snapshot,
             referenceDate: referenceDate
-        )
-        let vehiclesByRouteKey = buildVehiclesByRouteKey(snapshot.vehicles)
+        ) : [:]
+        let vehiclesByRouteKey = feedMode == .standard ? buildVehiclesByRouteKey(snapshot.vehicles) : [:]
         let candidates = candidatePairs(
             index: index,
             userLocation: userLocation,
-            scope: scope
+            scope: scope,
+            feedMode: feedMode
         )
 
         return buildCards(
@@ -114,8 +121,8 @@ struct NearbyETAComposer {
             userLocation: userLocation,
             candidates: candidates,
             referenceDate: referenceDate,
-            sortsByETA: true,
-            maxCount: maxCards
+            sortsByETA: feedMode == .standard,
+            maxCount: feedMode == .standard ? maxCards : nil
         )
     }
 
@@ -125,15 +132,16 @@ struct NearbyETAComposer {
         snapshot: RealtimeSnapshot,
         userLocation: CLLocationCoordinate2D?,
         favorites: [FavoriteArrivalID],
+        feedMode: NearbyETAFeedMode = .standard,
         referenceDate: Date = Date()
     ) -> [NearbyETACard] {
-        let liveArrivals = buildLiveArrivalLookup(
+        let liveArrivals = feedMode == .standard ? buildLiveArrivalLookup(
             staticData: staticData,
             index: index,
             snapshot: snapshot,
             referenceDate: referenceDate
-        )
-        let vehiclesByRouteKey = buildVehiclesByRouteKey(snapshot.vehicles)
+        ) : [:]
+        let vehiclesByRouteKey = feedMode == .standard ? buildVehiclesByRouteKey(snapshot.vehicles) : [:]
         let candidates = favorites.map { favorite in
             (
                 routeKey: RouteKey(route: favorite.routeID, direction: favorite.directionID),
@@ -272,16 +280,23 @@ struct NearbyETAComposer {
     private func candidatePairs(
         index: TransitDataIndex,
         userLocation: CLLocationCoordinate2D?,
-        scope: NearbyETAScope
+        scope: NearbyETAScope,
+        feedMode: NearbyETAFeedMode
     ) -> [(routeKey: RouteKey, stopID: String)] {
         switch scope {
         case .nearby:
-            guard let userLocation else { return [] }
-            let stops = index.nearestStops(
-                to: userLocation,
-                radiusMeters: nearbyStopRadius,
-                limit: maxNearbyStops
-            )
+            let stops: [BusStop]
+            if feedMode == .scheduledList {
+                return allScheduledPairs(index: index)
+            } else if let userLocation {
+                stops = index.nearestStops(
+                    to: userLocation,
+                    radiusMeters: nearbyStopRadius,
+                    limit: maxNearbyStops
+                )
+            } else {
+                stops = []
+            }
             return buildPairs(for: stops, index: index)
         case .route(let routeID, let directionID):
             let routeKeys = index.routeKeysByRouteID[routeID, default: []].filter { key in
@@ -303,6 +318,28 @@ struct NearbyETAComposer {
             guard let stop = index.allStopsByID[stopID] else { return [] }
             return buildPairs(for: [stop], index: index)
         }
+    }
+
+    private func allScheduledPairs(index: TransitDataIndex) -> [(routeKey: RouteKey, stopID: String)] {
+        index.schedulesByRouteKeyAndStopID
+            .keys
+            .sorted { lhs, rhs in
+                if lhs.route != rhs.route {
+                    return lhs.route.localizedStandardCompare(rhs.route) == .orderedAscending
+                }
+                return lhs.direction.localizedStandardCompare(rhs.direction) == .orderedAscending
+            }
+            .flatMap { routeKey in
+                index.schedulesByRouteKeyAndStopID[routeKey, default: [:]]
+                    .values
+                    .sorted { lhs, rhs in
+                        if lhs.sequence != rhs.sequence {
+                            return lhs.sequence < rhs.sequence
+                        }
+                        return lhs.stop.name.localizedStandardCompare(rhs.stop.name) == .orderedAscending
+                    }
+                    .map { (routeKey: routeKey, stopID: $0.stop.id) }
+            }
     }
 
     private func scopedStops(

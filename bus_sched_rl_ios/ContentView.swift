@@ -1,7 +1,9 @@
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openURL) private var openURL
 
     @StateObject private var viewModel = NearbyETAViewModel()
     @StateObject private var locationService = LocationService()
@@ -124,12 +126,14 @@ struct ContentView: View {
         .task {
             viewModel.loadIfNeeded()
             viewModel.setScenePhase(scenePhase)
+            viewModel.updateLocationAuthorization(locationService.authorizationState)
             locationService.requestAccessAndStart()
         }
         .onChange(of: scenePhase) { _, newPhase in
             viewModel.setScenePhase(newPhase)
         }
         .onChange(of: locationService.authorizationState) { _, newState in
+            viewModel.updateLocationAuthorization(newState)
             if newState.isAuthorized {
                 locationService.requestAccessAndStart()
             }
@@ -207,6 +211,12 @@ struct ContentView: View {
                     locationService.requestAccessAndStart()
                 }
                 .buttonStyle(.borderedProminent)
+            } else if locationService.authorizationState == .denied || locationService.authorizationState == .restricted {
+                Button("Open Settings") {
+                    guard let settingsURL = URL(string: UIApplication.openSettingsURLString) else { return }
+                    openURL(settingsURL)
+                }
+                .buttonStyle(.borderedProminent)
             }
         }
         .padding(16)
@@ -226,7 +236,7 @@ struct ContentView: View {
         case .notDetermined:
             return "The home screen uses your current location to load routes and stops closest to you."
         case .denied, .restricted:
-            return "Location is currently unavailable. Search still works, but the nearby ETA feed cannot center on your actual position."
+            return "Location is off. The app is showing schedule-only arrivals without using your location until you turn access back on."
         case .authorized:
             return ""
         }

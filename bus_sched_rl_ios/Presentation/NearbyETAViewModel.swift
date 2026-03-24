@@ -45,6 +45,7 @@ final class NearbyETAViewModel: ObservableObject {
     private var searchIndex: SearchIndex?
     private var snapshot = RealtimeSnapshot(vehicles: [], tripUpdates: [])
     private var userLocation: CLLocationCoordinate2D?
+    private var locationAuthorizationState: LocationAuthorizationState = .notDetermined
     private var isSceneActive = true
     private var hasLoaded = false
     private var suppressQuerySideEffects = false
@@ -81,15 +82,23 @@ final class NearbyETAViewModel: ObservableObject {
         if let selectedResult {
             return selectionTitle(for: selectedResult)
         }
-        return "Nearby arrivals"
+        switch feedMode {
+        case .standard:
+            return "Nearby arrivals"
+        case .scheduledList:
+            return "Scheduled buses"
+        }
     }
 
     var subtitleText: String {
         switch activeScope {
         case .nearby:
-            return userLocation == nil
-                ? "Turn on location to see buses near you."
-                : "Live and fallback ETAs for stops closest to you."
+            switch feedMode {
+            case .standard:
+                return "Live and fallback ETAs for stops closest to you."
+            case .scheduledList:
+                return "Showing all scheduled buses until location access is turned on."
+            }
         case .route:
             return "Filtered to the selected route."
         case .stop:
@@ -127,6 +136,16 @@ final class NearbyETAViewModel: ObservableObject {
 
     func updateUserLocation(_ location: CLLocationCoordinate2D?) {
         userLocation = location
+        refreshCards()
+        scheduleSearch()
+    }
+
+    func updateLocationAuthorization(_ authorizationState: LocationAuthorizationState) {
+        guard locationAuthorizationState != authorizationState else { return }
+        locationAuthorizationState = authorizationState
+        if authorizationState != .authorized {
+            userLocation = nil
+        }
         refreshCards()
         scheduleSearch()
     }
@@ -386,12 +405,14 @@ final class NearbyETAViewModel: ObservableObject {
 
         cardsTask = Task { [weak self] in
             guard let self else { return }
+            let feedMode = self.feedMode
             let cards = composer.composeCards(
                 staticData: staticData,
                 index: dataIndex,
                 snapshot: snapshot,
                 userLocation: location,
-                scope: scope
+                scope: scope,
+                feedMode: feedMode
             )
 
             if Task.isCancelled { return }
@@ -428,6 +449,7 @@ final class NearbyETAViewModel: ObservableObject {
             snapshot: snapshot,
             userLocation: userLocation,
             favorites: favoriteIDs,
+            feedMode: feedMode,
             referenceDate: referenceDate
         )
 
@@ -485,6 +507,19 @@ final class NearbyETAViewModel: ObservableObject {
             return 2
         case .info:
             return 1
+        }
+    }
+
+    private var feedMode: NearbyETAFeedMode {
+        guard selectedResult == nil, activeScope == .nearby else {
+            return .standard
+        }
+
+        switch locationAuthorizationState {
+        case .authorized:
+            return .standard
+        case .notDetermined, .denied, .restricted:
+            return .scheduledList
         }
     }
 

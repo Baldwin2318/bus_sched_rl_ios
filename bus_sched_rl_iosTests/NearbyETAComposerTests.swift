@@ -178,6 +178,64 @@ final class NearbyETAComposerTests: XCTestCase {
         XCTAssertEqual(cards.first?.liveVehicleID, "vehicle-1")
     }
 
+    func testComposeCardsScheduledListIgnoresLiveDataAndDoesNotCapResults() {
+        let now = Date()
+        let routeStopSchedules = Dictionary(uniqueKeysWithValues: (1...24).map { index in
+            let routeKey = RouteKey(route: "\(index)", direction: "0")
+            let stop = BusStop(
+                id: "stop-\(index)",
+                name: "Stop \(index)",
+                coord: CLLocationCoordinate2D(latitude: 45.50 + (Double(index) * 0.0001), longitude: -73.60)
+            )
+            return (
+                routeKey,
+                [
+                    RouteStopSchedule(
+                        stop: stop,
+                        sequence: 1,
+                        scheduledArrival: "23:59:00",
+                        scheduledDeparture: nil
+                    )
+                ]
+            )
+        })
+        let staticData = makeStaticData(routeStopSchedules: routeStopSchedules)
+        let snapshot = RealtimeSnapshot(
+            vehicles: [],
+            tripUpdates: (1...24).map { index in
+                TripUpdatePayload(
+                    tripID: "trip-\(index)",
+                    routeID: "\(index)",
+                    directionID: 0,
+                    vehicleID: nil,
+                    timestamp: now,
+                    stopTimeUpdates: [
+                        TripStopTimeUpdate(
+                            stopID: "stop-\(index)",
+                            stopSequence: 1,
+                            arrivalTime: now.addingTimeInterval(2 * 60),
+                            departureTime: nil
+                        )
+                    ]
+                )
+            }
+        )
+
+        let cards = NearbyETAComposer().composeCards(
+            staticData: staticData,
+            index: TransitDataIndex(staticData: staticData),
+            snapshot: snapshot,
+            userLocation: nil,
+            scope: .nearby,
+            feedMode: .scheduledList,
+            referenceDate: now
+        )
+
+        XCTAssertEqual(cards.count, 24)
+        XCTAssertTrue(cards.allSatisfy { $0.source == .scheduled })
+        XCTAssertTrue(cards.allSatisfy { $0.liveVehicleID == nil })
+    }
+
     private func makeStaticData(
         routeStopSchedules: [RouteKey: [RouteStopSchedule]],
         routeDirectionLabels: [RouteKey: String] = [:]

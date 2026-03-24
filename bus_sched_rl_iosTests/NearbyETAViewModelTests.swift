@@ -503,6 +503,74 @@ final class NearbyETAViewModelTests: XCTestCase {
         XCTAssertFalse(viewModel.nearbyCards.isEmpty)
     }
 
+    func testDeniedLocationShowsUnlimitedScheduledBusList() async throws {
+        let routeStopSchedules = Dictionary(uniqueKeysWithValues: (1...24).map { index in
+            let routeKey = RouteKey(route: "\(index)", direction: "0")
+            let stop = BusStop(
+                id: "stop-\(index)",
+                name: "Stop \(index)",
+                coord: CLLocationCoordinate2D(latitude: 45.50 + (Double(index) * 0.0001), longitude: -73.60)
+            )
+            return (
+                routeKey,
+                [
+                    RouteStopSchedule(
+                        stop: stop,
+                        sequence: 1,
+                        scheduledArrival: "23:59:00",
+                        scheduledDeparture: nil
+                    )
+                ]
+            )
+        })
+        let staticData = GTFSStaticData(
+            routeStops: routeStopSchedules.mapValues { $0.map(\.stop) },
+            routeStopSchedules: routeStopSchedules,
+            routeDirectionLabels: [:],
+            routeNamesByRouteID: Dictionary(uniqueKeysWithValues: (1...24).map {
+                ("\($0)", GTFSRouteName(shortName: "\($0)", longName: "Route \($0)"))
+            }),
+            routeStylesByRouteID: [:],
+            feedInfo: nil
+        )
+        let now = Date()
+        let snapshot = RealtimeSnapshot(
+            vehicles: [],
+            tripUpdates: [
+                TripUpdatePayload(
+                    tripID: "trip-1",
+                    routeID: "1",
+                    directionID: 0,
+                    vehicleID: nil,
+                    timestamp: now,
+                    stopTimeUpdates: [
+                        TripStopTimeUpdate(
+                            stopID: "stop-1",
+                            stopSequence: 1,
+                            arrivalTime: now.addingTimeInterval(2 * 60),
+                            departureTime: nil
+                        )
+                    ]
+                )
+            ]
+        )
+        let viewModel = NearbyETAViewModel(
+            gtfsRepository: StaticRepository(staticData: staticData),
+            realtimeRepository: SnapshotRepository(snapshot: snapshot),
+            livePollInterval: .seconds(120)
+        )
+
+        viewModel.updateLocationAuthorization(.denied)
+        viewModel.loadIfNeeded()
+
+        try await waitUntil { !viewModel.nearbyCards.isEmpty }
+
+        XCTAssertEqual(viewModel.titleText, "Scheduled buses")
+        XCTAssertEqual(viewModel.nearbyCards.count, 24)
+        XCTAssertTrue(viewModel.nearbyCards.allSatisfy { $0.source == .scheduled })
+        XCTAssertEqual(viewModel.subtitleText, "Showing all scheduled buses until location access is turned on.")
+    }
+
     func testMainAlertsMatchVisibleCardsAndIgnoreUnrelatedScopes() async throws {
         let routeKey = RouteKey(route: "55", direction: "0")
         let stop = BusStop(
