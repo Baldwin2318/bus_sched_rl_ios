@@ -164,6 +164,17 @@ struct TripUpdatePayload: Hashable {
 struct RealtimeSnapshot {
     let vehicles: [VehiclePosition]
     let tripUpdates: [TripUpdatePayload]
+    let alerts: [ServiceAlert]
+
+    init(
+        vehicles: [VehiclePosition],
+        tripUpdates: [TripUpdatePayload],
+        alerts: [ServiceAlert] = []
+    ) {
+        self.vehicles = vehicles
+        self.tripUpdates = tripUpdates
+        self.alerts = alerts
+    }
 }
 
 enum ArrivalSourceLabel: String, Equatable {

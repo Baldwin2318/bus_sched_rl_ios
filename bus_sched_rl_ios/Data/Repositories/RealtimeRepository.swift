@@ -15,6 +15,7 @@ extension RealtimeRepository {
 actor STMRealtimeRepository: RealtimeRepository {
     private let vehicleFeedURL = URL(string: "https://api.stm.info/pub/od/gtfs-rt/ic/v2/vehiclePositions")!
     private let tripUpdatesFeedURL = URL(string: "https://api.stm.info/pub/od/gtfs-rt/ic/v2/tripUpdates")!
+    private let alertsFeedURL = URL(string: "https://api.stm.info/pub/od/gtfs-rt/ic/v2/serviceAlerts")!
     private let apiKey: String
     private let session: URLSession
 
@@ -30,10 +31,20 @@ actor STMRealtimeRepository: RealtimeRepository {
 
         async let vehiclesTask = fetchVehiclesFeed(apiKey: apiKey)
         async let tripUpdatesTask = fetchTripUpdatesFeed(apiKey: apiKey)
+        async let alertsTask = fetchAlertsFeed(apiKey: apiKey)
 
         let vehicles = try await vehiclesTask
-        let tripUpdates = (try? await tripUpdatesTask) ?? []
-        return RealtimeSnapshot(vehicles: vehicles, tripUpdates: tripUpdates)
+        let tripUpdateResult = try? await tripUpdatesTask
+        let tripUpdates = tripUpdateResult?.updates ?? []
+        let embeddedAlerts = tripUpdateResult?.alerts ?? []
+        let serviceAlerts = (try? await alertsTask) ?? []
+        let alerts = dedupeAlerts(embeddedAlerts + serviceAlerts)
+
+        return RealtimeSnapshot(
+            vehicles: vehicles,
+            tripUpdates: tripUpdates,
+            alerts: alerts
+        )
     }
 
     private func fetchVehiclesFeed(apiKey: String) async throws -> [VehiclePosition] {
@@ -72,16 +83,10 @@ actor STMRealtimeRepository: RealtimeRepository {
         }
     }
 
-    private func fetchTripUpdatesFeed(apiKey: String) async throws -> [TripUpdatePayload] {
-        var request = URLRequest(url: tripUpdatesFeedURL)
-        request.timeoutInterval = 7
-        request.addValue(apiKey, forHTTPHeaderField: "apiKey")
-        request.addValue("application/x-protobuf", forHTTPHeaderField: "Accept")
+    private func fetchTripUpdatesFeed(apiKey: String) async throws -> (updates: [TripUpdatePayload], alerts: [ServiceAlert]) {
+        let feed = try await fetchFeed(url: tripUpdatesFeedURL, apiKey: apiKey)
 
-        let (data, _) = try await session.data(for: request)
-        let feed = try TransitRealtime_FeedMessage(serializedBytes: data)
-
-        return feed.entity.compactMap { entity in
+        let updates = feed.entity.compactMap { entity in
             guard entity.hasTripUpdate else { return nil }
             let tripUpdate = entity.tripUpdate
             guard tripUpdate.hasTrip,
@@ -111,6 +116,31 @@ actor STMRealtimeRepository: RealtimeRepository {
                 stopTimeUpdates: stopUpdates
             )
         }
+
+        return (
+            updates: updates,
+            alerts: GTFSRealtimeAlertParser.parseAlerts(from: feed)
+        )
+    }
+
+    private func fetchAlertsFeed(apiKey: String) async throws -> [ServiceAlert] {
+        let feed = try await fetchFeed(url: alertsFeedURL, apiKey: apiKey)
+        return GTFSRealtimeAlertParser.parseAlerts(from: feed)
+    }
+
+    private func fetchFeed(url: URL, apiKey: String) async throws -> TransitRealtime_FeedMessage {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 7
+        request.addValue(apiKey, forHTTPHeaderField: "apiKey")
+        request.addValue("application/x-protobuf", forHTTPHeaderField: "Accept")
+
+        let (data, _) = try await session.data(for: request)
+        return try TransitRealtime_FeedMessage(serializedBytes: data)
+    }
+
+    private func dedupeAlerts(_ alerts: [ServiceAlert]) -> [ServiceAlert] {
+        var seen: Set<String> = []
+        return alerts.filter { seen.insert($0.id).inserted }
     }
 
     private func stopTimeEventDate(_ event: TransitRealtime_TripUpdate.StopTimeEvent) -> Date? {
@@ -119,6 +149,136 @@ actor STMRealtimeRepository: RealtimeRepository {
     }
 
     private func normalized(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+struct GTFSRealtimeAlertParser {
+    static func parseAlerts(from feed: TransitRealtime_FeedMessage, referenceDate: Date = Date()) -> [ServiceAlert] {
+        feed.entity.compactMap { entity in
+            guard entity.hasAlert else { return nil }
+            let alert = entity.alert
+            let scopes = alert.informedEntity.compactMap(parseScope)
+            let title = translatedText(alert.headerText)
+                ?? translatedText(alert.effectDetail)
+                ?? translatedText(alert.causeDetail)
+                ?? effectSummary(alert.effect)
+                ?? "Service alert"
+            let message = translatedText(alert.descriptionText)
+                ?? translatedText(alert.effectDetail)
+                ?? translatedText(alert.causeDetail)
+            let activePeriods = alert.activePeriod.compactMap(parseDateInterval)
+
+            let serviceAlert = ServiceAlert(
+                id: normalized(entity.id) ?? derivedID(title: title, scopes: scopes, activePeriods: activePeriods),
+                title: title,
+                message: message,
+                severity: severity(alert.severityLevel, effect: alert.effect),
+                url: translatedURL(alert.url),
+                activePeriods: activePeriods,
+                scopes: scopes
+            )
+
+            return serviceAlert.isActive(at: referenceDate) ? serviceAlert : nil
+        }
+    }
+
+    private static func parseScope(_ selector: TransitRealtime_EntitySelector) -> AlertScopeSelector {
+        AlertScopeSelector(
+            routeID: normalized(selector.hasRouteID ? selector.routeID : nil),
+            directionID: selector.hasDirectionID ? String(selector.directionID) : nil,
+            stopID: normalized(selector.hasStopID ? selector.stopID : nil),
+            tripID: selector.hasTrip ? normalized(selector.trip.tripID) : nil
+        )
+    }
+
+    private static func parseDateInterval(_ timeRange: TransitRealtime_TimeRange) -> DateInterval? {
+        let start = timeRange.hasStart ? Date(timeIntervalSince1970: TimeInterval(timeRange.start)) : .distantPast
+        let end = timeRange.hasEnd ? Date(timeIntervalSince1970: TimeInterval(timeRange.end)) : .distantFuture
+        guard start <= end else { return nil }
+        return DateInterval(start: start, end: end)
+    }
+
+    private static func translatedText(_ translatedString: TransitRealtime_TranslatedString) -> String? {
+        translatedString.translation.lazy
+            .map(\.text)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+    }
+
+    private static func translatedURL(_ translatedString: TransitRealtime_TranslatedString) -> URL? {
+        guard let rawValue = translatedText(translatedString) else { return nil }
+        return URL(string: rawValue)
+    }
+
+    private static func severity(
+        _ protobufSeverity: TransitRealtime_Alert.SeverityLevel,
+        effect: TransitRealtime_Alert.Effect
+    ) -> AlertSeverity {
+        switch protobufSeverity {
+        case .info, .unknownSeverity:
+            switch effect {
+            case .stopMoved, .detour, .modifiedService, .reducedService, .significantDelays:
+                return .warning
+            case .noService, .stationClosed, .stopClosed:
+                return .severe
+            default:
+                return .info
+            }
+        case .warning:
+            return .warning
+        case .severe:
+            return .severe
+        }
+    }
+
+    private static func effectSummary(_ effect: TransitRealtime_Alert.Effect) -> String? {
+        switch effect {
+        case .detour:
+            return "Detour"
+        case .significantDelays:
+            return "Significant delays"
+        case .modifiedService:
+            return "Modified service"
+        case .reducedService:
+            return "Reduced service"
+        case .additionalService:
+            return "Additional service"
+        case .noService:
+            return "No service"
+        case .stopMoved:
+            return "Stop moved"
+        case .stopClosed:
+            return "Stop closed"
+        case .stationClosed:
+            return "Station closed"
+        default:
+            return nil
+        }
+    }
+
+    private static func derivedID(
+        title: String,
+        scopes: [AlertScopeSelector],
+        activePeriods: [DateInterval]
+    ) -> String {
+        let scopeKey = scopes.map {
+            [
+                $0.routeID ?? "",
+                $0.directionID ?? "",
+                $0.stopID ?? "",
+                $0.tripID ?? "",
+            ].joined(separator: "|")
+        }.joined(separator: ",")
+        let activeKey = activePeriods.map {
+            "\($0.start.timeIntervalSince1970)-\($0.end.timeIntervalSince1970)"
+        }.joined(separator: ",")
+        return "\(title)#\(scopeKey)#\(activeKey)"
+    }
+
+    private static func normalized(_ value: String?) -> String? {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed

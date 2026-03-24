@@ -9,6 +9,11 @@ final class NearbyETAViewModel: ObservableObject {
         static let maxResults = 20
     }
 
+    private enum AlertConfig {
+        static let maxMainAlerts = 3
+        static let maxDetailAlerts = 4
+    }
+
     @Published var query: String = "" {
         didSet {
             guard query != oldValue else { return }
@@ -19,6 +24,7 @@ final class NearbyETAViewModel: ObservableObject {
     @Published private(set) var cards: [NearbyETACard] = []
     @Published private(set) var favoriteCards: [NearbyETACard] = []
     @Published private(set) var nearbyCards: [NearbyETACard] = []
+    @Published private(set) var mainAlerts: [ServiceAlert] = []
     @Published private(set) var searchResults: [SearchResult] = []
     @Published private(set) var phase: NearbyETAPhase = .idle
     @Published private(set) var isRefreshing = false
@@ -227,6 +233,14 @@ final class NearbyETAViewModel: ObservableObject {
         return nil
     }
 
+    func alerts(for card: NearbyETACard) -> [ServiceAlert] {
+        scopedAlerts(
+            for: [card],
+            limit: AlertConfig.maxDetailAlerts,
+            referenceDate: Date()
+        )
+    }
+
     func arrivalLiveMapModel(
         for card: NearbyETACard,
         userLocation: CLLocationCoordinate2D?
@@ -359,6 +373,7 @@ final class NearbyETAViewModel: ObservableObject {
             cards = []
             favoriteCards = []
             nearbyCards = []
+            mainAlerts = []
             return
         }
 
@@ -391,9 +406,15 @@ final class NearbyETAViewModel: ObservableObject {
     private func rebuildPresentationLists(referenceDate: Date) {
         let resolvedFavoriteCards = resolveFavoriteCards(referenceDate: referenceDate)
         let favoriteCardIDs = Set(resolvedFavoriteCards.map(\.id))
+        let visibleCards = resolvedFavoriteCards + cards.filter { !favoriteCardIDs.contains($0.id) }
 
         favoriteCards = resolvedFavoriteCards
         nearbyCards = cards.filter { !favoriteCardIDs.contains($0.id) }
+        mainAlerts = scopedAlerts(
+            for: visibleCards,
+            limit: AlertConfig.maxMainAlerts,
+            referenceDate: referenceDate
+        )
     }
 
     private func resolveFavoriteCards(referenceDate: Date) -> [NearbyETACard] {
@@ -417,6 +438,53 @@ final class NearbyETAViewModel: ObservableObject {
         let resolvedByID = Dictionary(uniqueKeysWithValues: resolvedCards.map { (FavoriteArrivalID(card: $0).id, $0) })
         return favoriteIDs.compactMap { favoriteID in
             resolvedByID[favoriteID.id] ?? favoriteFallbackCardsByID[favoriteID.id]
+        }
+    }
+
+    private func scopedAlerts(
+        for cards: [NearbyETACard],
+        limit: Int?,
+        referenceDate: Date
+    ) -> [ServiceAlert] {
+        let matchedAlerts: [ServiceAlert]
+        if cards.isEmpty {
+            matchedAlerts = snapshot.alerts.filter {
+                $0.isGlobal && $0.isActive(at: referenceDate)
+            }
+        } else {
+            matchedAlerts = snapshot.alerts.filter { alert in
+                cards.contains { alert.matches(card: $0, at: referenceDate) }
+            }
+        }
+
+        let sortedAlerts = matchedAlerts
+            .reduce(into: [String: ServiceAlert]()) { partialResult, alert in
+                partialResult[alert.id] = alert
+            }
+            .values
+            .sorted { lhs, rhs in
+                let lhsRank = severityRank(lhs.severity)
+                let rhsRank = severityRank(rhs.severity)
+                if lhsRank != rhsRank {
+                    return lhsRank > rhsRank
+                }
+                return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+            }
+
+        if let limit {
+            return Array(sortedAlerts.prefix(limit))
+        }
+        return sortedAlerts
+    }
+
+    private func severityRank(_ severity: AlertSeverity) -> Int {
+        switch severity {
+        case .severe:
+            return 3
+        case .warning:
+            return 2
+        case .info:
+            return 1
         }
     }
 
