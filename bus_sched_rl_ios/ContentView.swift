@@ -1,13 +1,5 @@
 import SwiftUI
 
-private enum NearbyETATheme {
-    static let background = Color(.systemBackground)
-    static let panel = Color(.secondarySystemBackground)
-    static let panelBorder = Color(.separator)
-    static let secondaryText = Color(.secondaryLabel)
-    static let accentFallback = Color(red: 0.12, green: 0.34, blue: 0.68)
-}
-
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
 
@@ -252,7 +244,12 @@ struct ContentView: View {
                     emptyStatePanel
                 } else {
                     ForEach(viewModel.cards) { card in
-                        ETACardView(card: card)
+                        NavigationLink {
+                            ArrivalDetailView(viewModel: viewModel, initialCard: card)
+                        } label: {
+                            ETACardView(card: card, showsDisclosureIndicator: true)
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
             }
@@ -375,120 +372,5 @@ private struct SearchResultRow: View {
             let routes = stop.stop.nearbyRouteIds.prefix(4).joined(separator: ", ")
             return routes.isEmpty ? "Show arrivals for this stop" : "Routes \(routes)"
         }
-    }
-}
-
-private struct ETACardView: View {
-    let card: NearbyETACard
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 14) {
-            VStack(spacing: 8) {
-                Text(card.routeShortName)
-                    .font(.system(size: 20, weight: .bold, design: .rounded))
-                    .foregroundStyle(routeTextColor)
-                    .frame(minWidth: 62)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 10)
-                    .background(routeColor, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-
-                Text(card.source.rawValue.uppercased())
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(routeColor)
-            }
-
-            VStack(alignment: .leading, spacing: 5) {
-                Text(card.directionText)
-                    .font(.headline)
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-
-                Text(card.stopName)
-                    .font(.subheadline)
-                    .foregroundStyle(NearbyETATheme.secondaryText)
-                    .lineLimit(1)
-
-                HStack(spacing: 8) {
-                    if let distanceText {
-                        Label(distanceText, systemImage: "location")
-                            .labelStyle(.titleAndIcon)
-                    }
-                    Text(card.arrivalTime?.formatted(date: .omitted, time: .shortened) ?? "No time")
-                }
-                .font(.caption.weight(.medium))
-                .foregroundStyle(NearbyETATheme.secondaryText)
-            }
-
-            Spacer(minLength: 12)
-
-            VStack(alignment: .trailing, spacing: 2) {
-                if let etaMinutes = card.etaMinutes {
-                    Text("\(etaMinutes)")
-                        .font(.system(size: 34, weight: .heavy, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(.primary)
-                    Text("min")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(NearbyETATheme.secondaryText)
-                } else {
-                    Text("--")
-                        .font(.system(size: 34, weight: .heavy, design: .rounded))
-                        .foregroundStyle(.primary)
-                    Text("ETA")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(NearbyETATheme.secondaryText)
-                }
-            }
-            .frame(minWidth: 58)
-        }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(NearbyETATheme.panel)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(NearbyETATheme.panelBorder, lineWidth: 1)
-        )
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(card.accessibilityLabel)
-    }
-
-    private var routeColor: Color {
-        Color(hex: card.routeStyle?.routeColorHex) ?? NearbyETATheme.accentFallback
-    }
-
-    private var routeTextColor: Color {
-        Color(hex: card.routeStyle?.routeTextColorHex) ?? .white
-    }
-
-    private var distanceText: String? {
-        guard let distanceMeters = card.distanceMeters else { return nil }
-        if distanceMeters < 1000 {
-            return "\(distanceMeters)m"
-        }
-        return String(format: "%.1fkm", Double(distanceMeters) / 1000)
-    }
-}
-
-private func routeChipColor(hex: String?) -> Color {
-    Color(hex: hex) ?? NearbyETATheme.accentFallback
-}
-
-private extension Color {
-    init?(hex: String?) {
-        guard let hex else { return nil }
-        let normalized = hex
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "#", with: "")
-            .uppercased()
-        guard normalized.count == 6, let value = Int(normalized, radix: 16) else {
-            return nil
-        }
-
-        let red = Double((value >> 16) & 0xFF) / 255.0
-        let green = Double((value >> 8) & 0xFF) / 255.0
-        let blue = Double(value & 0xFF) / 255.0
-        self.init(red: red, green: green, blue: blue)
     }
 }
