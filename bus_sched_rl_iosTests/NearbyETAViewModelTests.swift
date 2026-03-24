@@ -503,6 +503,130 @@ final class NearbyETAViewModelTests: XCTestCase {
         XCTAssertFalse(viewModel.nearbyCards.isEmpty)
     }
 
+    func testMainAlertsMatchVisibleCardsAndIgnoreUnrelatedScopes() async throws {
+        let routeKey = RouteKey(route: "55", direction: "0")
+        let stop = BusStop(
+            id: "stop-1",
+            name: "Main Stop",
+            coord: CLLocationCoordinate2D(latitude: 45.50, longitude: -73.60)
+        )
+        let staticData = GTFSStaticData(
+            routeStops: [routeKey: [stop]],
+            routeStopSchedules: [
+                routeKey: [
+                    RouteStopSchedule(
+                        stop: stop,
+                        sequence: 1,
+                        scheduledArrival: "08:00:00",
+                        scheduledDeparture: nil
+                    )
+                ]
+            ],
+            routeDirectionLabels: [routeKey: "Nord"],
+            routeNamesByRouteID: ["55": GTFSRouteName(shortName: "55", longName: "Mock Route")],
+            routeStylesByRouteID: [:],
+            feedInfo: nil
+        )
+        let snapshot = RealtimeSnapshot(
+            vehicles: [],
+            tripUpdates: [],
+            alerts: [
+                makeAlert(
+                    id: "matching-alert",
+                    routeID: "55",
+                    directionID: "0",
+                    stopID: "stop-1",
+                    severity: .warning
+                ),
+                makeAlert(
+                    id: "other-route-alert",
+                    routeID: "80",
+                    directionID: "0",
+                    stopID: "stop-1",
+                    severity: .warning
+                ),
+                makeAlert(
+                    id: "global-alert",
+                    routeID: nil,
+                    directionID: nil,
+                    stopID: nil,
+                    severity: .info
+                ),
+            ]
+        )
+        let viewModel = NearbyETAViewModel(
+            gtfsRepository: StaticRepository(staticData: staticData),
+            realtimeRepository: SnapshotRepository(snapshot: snapshot),
+            livePollInterval: .seconds(120)
+        )
+
+        viewModel.updateUserLocation(CLLocationCoordinate2D(latitude: 45.5001, longitude: -73.6001))
+        viewModel.loadIfNeeded()
+
+        try await waitUntil { !viewModel.nearbyCards.isEmpty }
+
+        XCTAssertEqual(viewModel.mainAlerts.map(\.id), ["matching-alert", "global-alert"])
+    }
+
+    func testDetailAlertsFilterToSelectedRouteAndStop() async throws {
+        let routeKey = RouteKey(route: "55", direction: "0")
+        let stop = BusStop(
+            id: "stop-1",
+            name: "Main Stop",
+            coord: CLLocationCoordinate2D(latitude: 45.50, longitude: -73.60)
+        )
+        let staticData = GTFSStaticData(
+            routeStops: [routeKey: [stop]],
+            routeStopSchedules: [
+                routeKey: [
+                    RouteStopSchedule(
+                        stop: stop,
+                        sequence: 1,
+                        scheduledArrival: "08:00:00",
+                        scheduledDeparture: nil
+                    )
+                ]
+            ],
+            routeDirectionLabels: [routeKey: "Nord"],
+            routeNamesByRouteID: ["55": GTFSRouteName(shortName: "55", longName: "Mock Route")],
+            routeStylesByRouteID: [:],
+            feedInfo: nil
+        )
+        let snapshot = RealtimeSnapshot(
+            vehicles: [],
+            tripUpdates: [],
+            alerts: [
+                makeAlert(
+                    id: "detail-match",
+                    routeID: "55",
+                    directionID: "0",
+                    stopID: "stop-1",
+                    severity: .warning
+                ),
+                makeAlert(
+                    id: "detail-miss",
+                    routeID: "55",
+                    directionID: "0",
+                    stopID: "stop-2",
+                    severity: .warning
+                ),
+            ]
+        )
+        let viewModel = NearbyETAViewModel(
+            gtfsRepository: StaticRepository(staticData: staticData),
+            realtimeRepository: SnapshotRepository(snapshot: snapshot),
+            livePollInterval: .seconds(120)
+        )
+
+        viewModel.updateUserLocation(CLLocationCoordinate2D(latitude: 45.5001, longitude: -73.6001))
+        viewModel.loadIfNeeded()
+
+        try await waitUntil { !viewModel.cards.isEmpty }
+        let card = try XCTUnwrap(viewModel.cards.first)
+
+        XCTAssertEqual(viewModel.alerts(for: card).map(\.id), ["detail-match"])
+    }
+
     private func waitUntil(
         timeoutSeconds: TimeInterval = 2.0,
         condition: @escaping () -> Bool
@@ -515,6 +639,31 @@ final class NearbyETAViewModelTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(20))
         }
         XCTFail("Timed out waiting for condition")
+    }
+
+    private func makeAlert(
+        id: String,
+        routeID: String?,
+        directionID: String?,
+        stopID: String?,
+        severity: AlertSeverity
+    ) -> ServiceAlert {
+        ServiceAlert(
+            id: id,
+            title: id,
+            message: nil,
+            severity: severity,
+            url: nil,
+            activePeriods: [],
+            scopes: [
+                AlertScopeSelector(
+                    routeID: routeID,
+                    directionID: directionID,
+                    stopID: stopID,
+                    tripID: nil
+                )
+            ]
+        )
     }
 }
 

@@ -86,7 +86,7 @@ actor STMRealtimeRepository: RealtimeRepository {
     private func fetchTripUpdatesFeed(apiKey: String) async throws -> (updates: [TripUpdatePayload], alerts: [ServiceAlert]) {
         let feed = try await fetchFeed(url: tripUpdatesFeedURL, apiKey: apiKey)
 
-        let updates = feed.entity.compactMap { entity in
+        let updates = feed.entity.compactMap { entity -> TripUpdatePayload? in
             guard entity.hasTripUpdate else { return nil }
             let tripUpdate = entity.tripUpdate
             guard tripUpdate.hasTrip,
@@ -160,7 +160,7 @@ struct GTFSRealtimeAlertParser {
         feed.entity.compactMap { entity in
             guard entity.hasAlert else { return nil }
             let alert = entity.alert
-            let scopes = alert.informedEntity.compactMap(parseScope)
+            let scopes = alert.informedEntity.map(parseScope)
             let title = translatedText(alert.headerText)
                 ?? translatedText(alert.effectDetail)
                 ?? translatedText(alert.causeDetail)
@@ -220,9 +220,9 @@ struct GTFSRealtimeAlertParser {
         switch protobufSeverity {
         case .info, .unknownSeverity:
             switch effect {
-            case .stopMoved, .detour, .modifiedService, .reducedService, .significantDelays:
+            case .stopMoved, .detour, .modifiedService, .reducedService, .significantDelays, .accessibilityIssue:
                 return .warning
-            case .noService, .stationClosed, .stopClosed:
+            case .noService:
                 return .severe
             default:
                 return .info
@@ -250,10 +250,8 @@ struct GTFSRealtimeAlertParser {
             return "No service"
         case .stopMoved:
             return "Stop moved"
-        case .stopClosed:
-            return "Stop closed"
-        case .stationClosed:
-            return "Station closed"
+        case .accessibilityIssue:
+            return "Accessibility issue"
         default:
             return nil
         }

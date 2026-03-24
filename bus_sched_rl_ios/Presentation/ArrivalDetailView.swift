@@ -72,10 +72,24 @@ struct ArrivalDetailView: View {
         )
     }
 
+    private var alerts: [ServiceAlert] {
+        viewModel.alerts(for: currentCard)
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 ETACardView(card: currentCard)
+
+                if !alerts.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Warnings")
+                            .font(.title3.weight(.semibold))
+                        ForEach(alerts) { alert in
+                            ServiceAlertView(alert: alert, compact: false)
+                        }
+                    }
+                }
 
                 if let liveMapModel {
                     VStack(alignment: .leading, spacing: 10) {
