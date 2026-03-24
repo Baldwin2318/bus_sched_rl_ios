@@ -1,10 +1,10 @@
 import SwiftUI
 
 private enum NearbyETATheme {
-    static let background = Color(red: 0.95, green: 0.96, blue: 0.98)
-    static let panel = Color.white
-    static let panelBorder = Color.black.opacity(0.08)
-    static let secondaryText = Color.black.opacity(0.58)
+    static let background = Color(.systemBackground)
+    static let panel = Color(.secondarySystemBackground)
+    static let panelBorder = Color(.separator)
+    static let secondaryText = Color(.secondaryLabel)
     static let accentFallback = Color(red: 0.12, green: 0.34, blue: 0.68)
 }
 
@@ -42,26 +42,29 @@ struct ContentView: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 18)
                 }
+                .refreshable {
+                    viewModel.refreshManually()
+                }
                 .scrollDismissesKeyboard(.interactively)
             }
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        viewModel.refreshManually()
-                    } label: {
-                        if viewModel.isRefreshing {
-                            ProgressView()
-                                .controlSize(.small)
-                        } else {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.headline.weight(.semibold))
-                        }
-                    }
-                    .disabled(viewModel.isRefreshing)
-                    .accessibilityLabel("Refresh arrivals")
-                }
-            }
+//            .toolbar {
+//                ToolbarItem(placement: .topBarTrailing) {
+//                    Button {
+//                        viewModel.refreshManually()
+//                    } label: {
+//                        if viewModel.isRefreshing {
+//                            ProgressView()
+//                                .controlSize(.small)
+//                        } else {
+//                            Image(systemName: "arrow.clockwise")
+//                                .font(.headline.weight(.semibold))
+//                        }
+//                    }
+//                    .disabled(viewModel.isRefreshing)
+//                    .accessibilityLabel("Refresh arrivals")
+//                }
+//            }
         }
         .task {
             viewModel.loadIfNeeded()
