@@ -6,6 +6,8 @@ enum NearbyETATheme {
     static let panelBorder = Color(.separator)
     static let secondaryText = Color(.secondaryLabel)
     static let accentFallback = Color(red: 0.12, green: 0.34, blue: 0.68)
+    static let skeletonBase = Color(.systemGray5)
+    static let skeletonHighlight = Color.white.opacity(0.42)
 }
 
 func routeChipColor(hex: String?) -> Color {

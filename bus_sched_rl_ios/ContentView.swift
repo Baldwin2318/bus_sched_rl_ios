@@ -2,6 +2,8 @@ import SwiftUI
 import UIKit
 
 struct ContentView: View {
+    private let loadingSkeletonCount = 4
+
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.openURL) private var openURL
 
@@ -70,8 +72,11 @@ struct ContentView: View {
                     Section {
                         switch viewModel.phase {
                         case .idle, .loading where viewModel.nearbyCards.isEmpty:
-                            loadingPanel
-                                .listRowStyling()
+                            ForEach(0..<loadingSkeletonCount, id: \.self) { index in
+                                SkeletonETACardView()
+                                    .listRowStyling()
+                                    .accessibilityIdentifier("loading-skeleton-\(index)")
+                            }
                         case .error(let message):
                             statusBanner(text: message, tint: .red)
                                 .listRowStyling()
@@ -337,25 +342,6 @@ struct ContentView: View {
             }
         }
         .padding(.top, 8)
-    }
-
-    private var loadingPanel: some View {
-        HStack(spacing: 12) {
-            ProgressView()
-            Text("Loading transit data...")
-                .font(.subheadline)
-                .foregroundStyle(NearbyETATheme.secondaryText)
-        }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(NearbyETATheme.panel)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(NearbyETATheme.panelBorder, lineWidth: 1)
-        )
     }
 
     private var emptyStatePanel: some View {
