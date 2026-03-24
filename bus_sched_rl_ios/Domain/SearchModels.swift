@@ -1,11 +1,6 @@
 import Foundation
 import CoreLocation
 
-struct GTFSRouteName: Codable, Hashable {
-    let shortName: String
-    let longName: String
-}
-
 struct RouteDirectionSearchEntry: Hashable {
     let directionId: String
     let directionText: String

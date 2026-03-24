@@ -17,6 +17,11 @@ struct GTFSRouteStyle: Codable, Hashable {
     let routeTextColorHex: String?
 }
 
+struct GTFSRouteName: Codable, Hashable {
+    let shortName: String
+    let longName: String
+}
+
 struct GTFSCacheMetadata: Equatable {
     let lastUpdatedAt: Date?
     let etag: String?
@@ -38,9 +43,9 @@ struct BusStop: Hashable {
 
     static func == (lhs: BusStop, rhs: BusStop) -> Bool {
         lhs.id == rhs.id &&
-        lhs.name == rhs.name &&
-        lhs.coord.latitude == rhs.coord.latitude &&
-        lhs.coord.longitude == rhs.coord.longitude
+            lhs.name == rhs.name &&
+            lhs.coord.latitude == rhs.coord.latitude &&
+            lhs.coord.longitude == rhs.coord.longitude
     }
 
     func hash(into hasher: inout Hasher) {
@@ -56,6 +61,24 @@ struct RouteStopSchedule: Hashable {
     let sequence: Int
     let scheduledArrival: String?
     let scheduledDeparture: String?
+}
+
+struct GTFSStaticData {
+    let routeStops: [RouteKey: [BusStop]]
+    let routeStopSchedules: [RouteKey: [RouteStopSchedule]]
+    let routeDirectionLabels: [RouteKey: String]
+    let routeNamesByRouteID: [String: GTFSRouteName]
+    let routeStylesByRouteID: [String: GTFSRouteStyle]
+    let feedInfo: GTFSFeedInfo?
+
+    var availableRoutes: [String] {
+        let routeIDs = Set(routeStops.keys.map(\.route))
+            .union(routeStopSchedules.keys.map(\.route))
+            .union(routeDirectionLabels.keys.map(\.route))
+            .union(routeNamesByRouteID.keys)
+            .union(routeStylesByRouteID.keys)
+        return routeIDs.sorted()
+    }
 }
 
 struct VehiclePosition: Identifiable, Equatable {
@@ -87,28 +110,13 @@ struct VehiclePosition: Identifiable, Equatable {
 
     static func == (lhs: VehiclePosition, rhs: VehiclePosition) -> Bool {
         lhs.id == rhs.id &&
-        lhs.tripID == rhs.tripID &&
-        lhs.route == rhs.route &&
-        lhs.direction == rhs.direction &&
-        lhs.heading == rhs.heading &&
-        lhs.coord.latitude == rhs.coord.latitude &&
-        lhs.coord.longitude == rhs.coord.longitude &&
-        lhs.lastUpdatedAt == rhs.lastUpdatedAt
-    }
-
-    func interpolated(to target: VehiclePosition, fraction: Double) -> VehiclePosition {
-        let progress = min(max(fraction, 0), 1)
-        let lat = coord.latitude + (target.coord.latitude - coord.latitude) * progress
-        let lon = coord.longitude + (target.coord.longitude - coord.longitude) * progress
-        return VehiclePosition(
-            id: id,
-            tripID: target.tripID ?? tripID,
-            route: target.route ?? route,
-            direction: target.direction ?? direction,
-            heading: target.heading,
-            coord: CLLocationCoordinate2D(latitude: lat, longitude: lon),
-            lastUpdatedAt: target.lastUpdatedAt ?? lastUpdatedAt
-        )
+            lhs.tripID == rhs.tripID &&
+            lhs.route == rhs.route &&
+            lhs.direction == rhs.direction &&
+            lhs.heading == rhs.heading &&
+            lhs.coord.latitude == rhs.coord.latitude &&
+            lhs.coord.longitude == rhs.coord.longitude &&
+            lhs.lastUpdatedAt == rhs.lastUpdatedAt
     }
 }
 
@@ -133,9 +141,48 @@ struct RealtimeSnapshot {
     let tripUpdates: [TripUpdatePayload]
 }
 
-enum BusMapPhase: Equatable {
+enum ArrivalSourceLabel: String, Equatable {
+    case live = "Live"
+    case estimated = "Estimated"
+    case scheduled = "Scheduled"
+}
+
+struct NearbyETACard: Identifiable, Hashable {
+    let id: String
+    let routeID: String
+    let routeShortName: String
+    let routeLongName: String
+    let directionID: String
+    let directionText: String
+    let stopID: String
+    let stopName: String
+    let distanceMeters: Int?
+    let etaMinutes: Int?
+    let arrivalTime: Date?
+    let source: ArrivalSourceLabel
+    let routeStyle: GTFSRouteStyle?
+
+    var accessibilityLabel: String {
+        var parts = ["Route \(routeShortName)", directionText, "Stop \(stopName)"]
+        if let etaMinutes {
+            parts.append("ETA \(etaMinutes) minutes")
+        } else if let arrivalTime {
+            parts.append("Arrives at \(arrivalTime.formatted(date: .omitted, time: .shortened))")
+        }
+        parts.append(source.rawValue)
+        return parts.joined(separator: ", ")
+    }
+}
+
+enum NearbyETAScope: Equatable {
+    case nearby
+    case route(routeID: String, directionID: String?)
+    case stop(stopID: String)
+}
+
+enum NearbyETAPhase: Equatable {
     case idle
-    case loading(String)
+    case loading
     case ready
     case error(String)
 }

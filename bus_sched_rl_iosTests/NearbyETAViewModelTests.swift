@@ -1,0 +1,169 @@
+import XCTest
+import CoreLocation
+@testable import bus_sched_rl_ios
+
+@MainActor
+final class NearbyETAViewModelTests: XCTestCase {
+    func testLoadBuildsNearbyCards() async throws {
+        let routeKey = RouteKey(route: "55", direction: "0")
+        let stop = BusStop(
+            id: "stop-1",
+            name: "Main Stop",
+            coord: CLLocationCoordinate2D(latitude: 45.50, longitude: -73.60)
+        )
+        let staticData = GTFSStaticData(
+            routeStops: [routeKey: [stop]],
+            routeStopSchedules: [
+                routeKey: [
+                    RouteStopSchedule(
+                        stop: stop,
+                        sequence: 1,
+                        scheduledArrival: "08:00:00",
+                        scheduledDeparture: nil
+                    )
+                ]
+            ],
+            routeDirectionLabels: [routeKey: "Nord"],
+            routeNamesByRouteID: ["55": GTFSRouteName(shortName: "55", longName: "Mock Route")],
+            routeStylesByRouteID: [:],
+            feedInfo: nil
+        )
+        let now = Date()
+        let snapshot = RealtimeSnapshot(
+            vehicles: [],
+            tripUpdates: [
+                TripUpdatePayload(
+                    tripID: "trip-1",
+                    routeID: "55",
+                    directionID: 0,
+                    vehicleID: nil,
+                    timestamp: now,
+                    stopTimeUpdates: [
+                        TripStopTimeUpdate(
+                            stopID: "stop-1",
+                            stopSequence: 1,
+                            arrivalTime: now.addingTimeInterval(3 * 60),
+                            departureTime: nil
+                        )
+                    ]
+                )
+            ]
+        )
+
+        let viewModel = NearbyETAViewModel(
+            gtfsRepository: StaticRepository(staticData: staticData),
+            realtimeRepository: SnapshotRepository(snapshot: snapshot),
+            livePollInterval: .seconds(120)
+        )
+
+        viewModel.updateUserLocation(CLLocationCoordinate2D(latitude: 45.5001, longitude: -73.6001))
+        viewModel.loadIfNeeded()
+
+        try await waitUntil { !viewModel.cards.isEmpty }
+
+        XCTAssertEqual(viewModel.cards.first?.routeID, "55")
+        XCTAssertEqual(viewModel.cards.first?.source, .live)
+    }
+
+    func testSelectingSearchResultFiltersToMatchedRoute() async throws {
+        let routeKey = RouteKey(route: "55", direction: "0")
+        let stop = BusStop(
+            id: "stop-1",
+            name: "Main Stop",
+            coord: CLLocationCoordinate2D(latitude: 45.50, longitude: -73.60)
+        )
+        let staticData = GTFSStaticData(
+            routeStops: [routeKey: [stop]],
+            routeStopSchedules: [
+                routeKey: [
+                    RouteStopSchedule(
+                        stop: stop,
+                        sequence: 1,
+                        scheduledArrival: "08:00:00",
+                        scheduledDeparture: nil
+                    )
+                ]
+            ],
+            routeDirectionLabels: [routeKey: "Nord"],
+            routeNamesByRouteID: ["55": GTFSRouteName(shortName: "55", longName: "Mock Route")],
+            routeStylesByRouteID: [:],
+            feedInfo: nil
+        )
+        let snapshot = RealtimeSnapshot(vehicles: [], tripUpdates: [])
+        let viewModel = NearbyETAViewModel(
+            gtfsRepository: StaticRepository(staticData: staticData),
+            realtimeRepository: SnapshotRepository(snapshot: snapshot),
+            livePollInterval: .seconds(120)
+        )
+
+        viewModel.loadIfNeeded()
+        try await waitUntil { viewModel.phase == .ready }
+
+        let routeEntry = RouteSearchEntry(
+            routeId: "55",
+            routeShortName: "55",
+            routeLongName: "Mock Route",
+            routeColor: nil,
+            directionOptions: [
+                RouteDirectionSearchEntry(directionId: "0", directionText: "Nord")
+            ]
+        )
+        let match = RouteSearchMatch(
+            route: routeEntry,
+            directionId: "0",
+            directionText: "Nord",
+            distanceMeters: nil
+        )
+
+        viewModel.selectSearchResult(.route(match))
+
+        XCTAssertEqual(viewModel.titleText, "55 Nord")
+        XCTAssertEqual(viewModel.cards.first?.routeID, "55")
+    }
+
+    private func waitUntil(
+        timeoutSeconds: TimeInterval = 2.0,
+        condition: @escaping () -> Bool
+    ) async throws {
+        let timeout = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < timeout {
+            if condition() {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("Timed out waiting for condition")
+    }
+}
+
+private actor StaticRepository: GTFSRepository {
+    let staticData: GTFSStaticData
+
+    init(staticData: GTFSStaticData) {
+        self.staticData = staticData
+    }
+
+    func loadStaticData() async throws -> GTFSStaticData {
+        staticData
+    }
+
+    func refreshStaticData(force: Bool) async throws -> GTFSStaticData {
+        staticData
+    }
+
+    func cacheMetadata() async -> GTFSCacheMetadata {
+        .empty
+    }
+}
+
+private actor SnapshotRepository: RealtimeRepository {
+    let snapshot: RealtimeSnapshot
+
+    init(snapshot: RealtimeSnapshot) {
+        self.snapshot = snapshot
+    }
+
+    func fetchSnapshot() async throws -> RealtimeSnapshot {
+        snapshot
+    }
+}

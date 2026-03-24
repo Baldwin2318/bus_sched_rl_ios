@@ -1,2363 +1,491 @@
 import SwiftUI
-import MapKit
-import Combine
-import UIKit
 
-private struct TraceArrowPoint: Identifiable {
-    let id: Int
-    let coord: CLLocationCoordinate2D
-    let angle: Double
-}
-
-private struct LivePulseDot: View {
-    let isActive: Bool
-    @State private var pulse = false
-
-    var body: some View {
-        Circle()
-            .fill(isActive ? Color.green : Color.gray)
-            .frame(width: 9, height: 9)
-            .scaleEffect(isActive && pulse ? 1.3 : 1.0)
-            .opacity(isActive && pulse ? 0.55 : 1.0)
-            .onAppear {
-                pulse = isActive
-            }
-            .onChange(of: isActive) { _, active in
-                pulse = active
-            }
-            .animation(
-                isActive ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true) : .default,
-                value: pulse
-            )
-    }
-}
-
-struct MarkerScalePolicy {
-    let minAltitude: CLLocationDistance
-    let maxAltitude: CLLocationDistance
-    let minScale: CGFloat
-    let maxScale: CGFloat
-    let selectedScaleBoost: CGFloat
-    let scaleUpdateThreshold: CGFloat
-    let animationDuration: TimeInterval
-
-    private let logMinAltitude: Double
-    private let logAltitudeRange: Double
-
-    static let `default` = MarkerScalePolicy(
-        minAltitude: 250,
-        maxAltitude: 24_000,
-        minScale: 0.35,
-        maxScale: 0.725,
-        selectedScaleBoost: 1.1,
-        scaleUpdateThreshold: 0.01,
-        animationDuration: 0.2
-    )
-
-    var initialScale: CGFloat {
-        scale(forAltitude: maxAltitude)
-    }
-
-    init(
-        minAltitude: CLLocationDistance,
-        maxAltitude: CLLocationDistance,
-        minScale: CGFloat,
-        maxScale: CGFloat,
-        selectedScaleBoost: CGFloat,
-        scaleUpdateThreshold: CGFloat,
-        animationDuration: TimeInterval
-    ) {
-        self.minAltitude = minAltitude
-        self.maxAltitude = maxAltitude
-        self.minScale = minScale
-        self.maxScale = maxScale
-        self.selectedScaleBoost = selectedScaleBoost
-        self.scaleUpdateThreshold = scaleUpdateThreshold
-        self.animationDuration = animationDuration
-
-        let safeMinAltitude = max(minAltitude, 1)
-        let safeMaxAltitude = max(maxAltitude, safeMinAltitude + 1)
-        let minLogValue = log(safeMinAltitude)
-        let maxLogValue = log(safeMaxAltitude)
-        logMinAltitude = minLogValue
-        logAltitudeRange = max(maxLogValue - minLogValue, .leastNonzeroMagnitude)
-    }
-
-    func scale(forAltitude altitude: CLLocationDistance) -> CGFloat {
-        let clampedAltitude = min(max(altitude, minAltitude), maxAltitude)
-        let clampedScaleMin = min(minScale, maxScale)
-        let clampedScaleMax = max(minScale, maxScale)
-        let logValue = log(max(clampedAltitude, 1))
-        let normalized = (logValue - logMinAltitude) / logAltitudeRange
-        let clampedNormalized = min(max(normalized, 0), 1)
-
-        let nextScale = Double(clampedScaleMax) - clampedNormalized * Double(clampedScaleMax - clampedScaleMin)
-        return CGFloat(nextScale)
-    }
-
-    func composedScale(baseScale: CGFloat, isSelected: Bool) -> CGFloat {
-        if isSelected {
-            return baseScale * selectedScaleBoost
-        }
-        return baseScale
-    }
-
-    func shouldApplyScale(current: CGFloat, next: CGFloat) -> Bool {
-        abs(current - next) >= scaleUpdateThreshold
-    }
-}
-
-private enum TransitSemanticPalette {
-    static let liveSource = Color.green.opacity(0.92)
-    static let scheduledSource = Color.orange.opacity(0.9)
-    static let liveFreshness = Color.green.opacity(0.85)
-    static let agingFreshness = Color.yellow.opacity(0.82)
-    static let staleFreshness = Color.red.opacity(0.74)
-    static let fallbackRoute = Color.blue.opacity(0.9)
-    static let fallbackRouteText = Color.white
-}
-
-private enum TransitColorResolver {
-    static func routeColor(style: GTFSRouteStyle?) -> Color {
-        if let color = color(fromHex: style?.routeColorHex) {
-            return color
-        }
-        return TransitSemanticPalette.fallbackRoute
-    }
-
-    static func routeTextColor(style: GTFSRouteStyle?) -> Color {
-        if let color = color(fromHex: style?.routeTextColorHex) {
-            return color
-        }
-        return TransitSemanticPalette.fallbackRouteText
-    }
-
-    private static func color(fromHex hex: String?) -> Color? {
-        guard let hex else { return nil }
-        let normalized = hex.trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "#", with: "")
-            .uppercased()
-        guard normalized.count == 6, let value = Int(normalized, radix: 16) else { return nil }
-
-        let red = Double((value >> 16) & 0xFF) / 255.0
-        let green = Double((value >> 8) & 0xFF) / 255.0
-        let blue = Double(value & 0xFF) / 255.0
-        return Color(red: red, green: green, blue: blue)
-    }
-}
-
-private enum ContrastAccessibility {
-    static let minimumContrastRatio = 4.5
-
-    static func readableTextColor(preferred: Color, on background: Color) -> Color {
-        if contrastRatio(preferred, background) >= minimumContrastRatio {
-            return preferred
-        }
-
-        let whiteContrast = contrastRatio(.white, background)
-        let blackContrast = contrastRatio(.black, background)
-        return whiteContrast >= blackContrast ? .white : .black
-    }
-
-    private static func contrastRatio(_ foreground: Color, _ background: Color) -> Double {
-        let foregroundLuminance = relativeLuminance(of: foreground)
-        let backgroundLuminance = relativeLuminance(of: background)
-        let lighter = max(foregroundLuminance, backgroundLuminance)
-        let darker = min(foregroundLuminance, backgroundLuminance)
-        return (lighter + 0.05) / (darker + 0.05)
-    }
-
-    private static func relativeLuminance(of color: Color) -> Double {
-        let components = rgbComponents(for: color)
-        let r = linearized(components.red)
-        let g = linearized(components.green)
-        let b = linearized(components.blue)
-        return (0.2126 * r) + (0.7152 * g) + (0.0722 * b)
-    }
-
-    private static func linearized(_ component: Double) -> Double {
-        if component <= 0.03928 {
-            return component / 12.92
-        }
-        return pow((component + 0.055) / 1.055, 2.4)
-    }
-
-    private static func rgbComponents(for color: Color) -> (red: Double, green: Double, blue: Double) {
-        let uiColor = UIColor(color)
-        var red: CGFloat = 0
-        var green: CGFloat = 0
-        var blue: CGFloat = 0
-        var alpha: CGFloat = 0
-
-        if uiColor.getRed(&red, green: &green, blue: &blue, alpha: &alpha) {
-            return (Double(red), Double(green), Double(blue))
-        }
-
-        var white: CGFloat = 0
-        if uiColor.getWhite(&white, alpha: &alpha) {
-            let value = Double(white)
-            return (value, value, value)
-        }
-
-        return (0, 0, 0)
-    }
-}
-
-private enum MapSheetRoute: Identifiable, Equatable {
-    case todaySchedules
-    case settings
-    case helpTips
-    case about
-    case stopArrivals(StopArrivalsPresentation)
-    case routeDetail(BusDetailPresentation)
-    case busDetail(BusDetailPresentation)
-
-    var id: String {
-        switch self {
-        case .todaySchedules:
-            return "todaySchedules"
-        case .settings:
-            return "settings"
-        case .helpTips:
-            return "helpTips"
-        case .about:
-            return "about"
-        case .stopArrivals(let stop):
-            return "stopArrivals:\(stop.id)"
-        case .routeDetail(let detail):
-            return "routeDetail:\(detail.id)"
-        case .busDetail(let detail):
-            return "busDetail:\(detail.id)"
-        }
-    }
-
-    var isBusDetail: Bool {
-        if case .busDetail = self {
-            return true
-        }
-        return false
-    }
-}
-
-private enum ArrivalsSheetState {
-    case loading
-    case error(String)
-    case noMoreToday
-    case empty
-    case content([BusSuggestion])
-}
-
-private enum CoachMarkKind: String {
-    case tapBus
-    case zoomStops
-    case pauseLive
-    case nearbyArrivals
-
-    var text: String {
-        switch self {
-        case .tapBus:
-            return "Tap a bus to see its route and stops"
-        case .zoomStops:
-            return "Zoom in to explore individual stops"
-        case .pauseLive:
-            return "Pause live tracking to save battery"
-        case .nearbyArrivals:
-            return "See nearby arrivals for this route"
-        }
-    }
+private enum NearbyETATheme {
+    static let background = Color(red: 0.95, green: 0.96, blue: 0.98)
+    static let panel = Color.white
+    static let panelBorder = Color.black.opacity(0.08)
+    static let secondaryText = Color.black.opacity(0.58)
+    static let accentFallback = Color(red: 0.12, green: 0.34, blue: 0.68)
 }
 
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.openURL) private var openURL
 
-    @StateObject private var vm = BusMapViewModel()
+    @StateObject private var viewModel = NearbyETAViewModel()
     @StateObject private var locationService = LocationService()
-    @StateObject private var searchVM = SearchViewModel()
-
-    @AppStorage("onboarding.locationPriming.completed") private var hasCompletedLocationPriming = false
-    @AppStorage("onboarding.locationPermissionRequested") private var hasRequestedLocationPermission = false
-    @AppStorage("coach.tapBus.shown") private var hasShownCoachTapBus = false
-    @AppStorage("coach.zoomStops.shown") private var hasShownCoachZoomStops = false
-    @AppStorage("coach.pauseLive.shown") private var hasShownCoachPauseLive = false
-    @AppStorage("coach.nearbyArrivals.shown") private var hasShownCoachNearbyArrivals = false
-    @AppStorage("state.selectedRouteID") private var persistedSelectedRouteID = ""
-    @AppStorage("state.selectedRouteDirectionID") private var persistedSelectedRouteDirectionID = ""
-    @AppStorage("state.map.center.latitude") private var persistedMapCenterLatitude = 0.0
-    @AppStorage("state.map.center.longitude") private var persistedMapCenterLongitude = 0.0
-    @AppStorage("state.map.camera.distance") private var persistedMapCameraDistance = 0.0
-    @AppStorage("state.map.camera.isStored") private var hasPersistedMapCamera = false
-
-    @State private var mapCamera = MapCameraPosition.automatic
-    @State private var didCenterToUser = false
-    @State private var tracePhase = 0
-    @State private var activeSheet: MapSheetRoute?
-    @State private var markerZoomScale = MarkerScalePolicy.default.initialScale
-    @State private var mapCenterCoordinate: CLLocationCoordinate2D?
-    @State private var mapCameraDistance: CLLocationDistance = 0
-    @State private var freshnessReferenceDate = Date()
-    @State private var showArrivalsHelp = false
-    @State private var showLocationPriming = false
-    @State private var activeCoachMark: CoachMarkKind?
-    @State private var liveRefreshSuccessCount = 0
-    @State private var hasRestoredRouteSelection = false
-    @State private var lastMapPersistAt = Date.distantPast
-    @State private var searchSheetDetent: PresentationDetent = .medium
-    @FocusState private var isSearchFieldFocused: Bool
-
-    private let markerScalePolicy = MarkerScalePolicy.default
-    private let stopMarkerMaxVisibleDistance: CLLocationDistance = 5_500
-    private let stopMarkerRadiusMeters: CLLocationDistance = 2_200
-    private let stopMarkerMaxCount = 80
-    private let recenterVisibilityThresholdMeters: CLLocationDistance = 75
-    private let mapPersistInterval: TimeInterval = 0.85
-    private let mapPersistDistanceThreshold: CLLocationDistance = 25
-    private let mapPersistZoomThreshold: CLLocationDistance = 40
-    private let traceTimer = Timer.publish(every: 0.45, on: .main, in: .common).autoconnect()
-    private let freshnessTimer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
+    @FocusState private var isSearchFocused: Bool
 
     var body: some View {
         NavigationStack {
-            ZStack(alignment: .bottom) {
-                Map(position: $mapCamera, interactionModes: .all) {
-                    if let userLocation = locationService.location {
-                        Marker("You", systemImage: "location.circle.fill", coordinate: userLocation)
-                            .tint(.red)
-                    }
+            ZStack {
+                NearbyETATheme.background.ignoresSafeArea()
 
-                    if !vm.selectedRouteShape.isEmpty {
-                        MapPolyline(coordinates: vm.selectedRouteShape)
-                            .stroke(Color.white.opacity(0.92), style: StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round))
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 14) {
+                        header
+                        searchBar
 
-                        MapPolyline(coordinates: vm.selectedRouteShape)
-                            .stroke(selectedRouteColor.opacity(0.9), style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round))
-
-                        ForEach(traceArrowPoints()) { point in
-                            Annotation("", coordinate: point.coord) {
-                                Image(systemName: "arrow.forward.circle.fill")
-                                    .font(.system(size: 18, weight: .bold))
-                                    .foregroundStyle(selectedRouteTextColor, selectedRouteColor)
-                                    .rotationEffect(.degrees(point.angle))
-                                    .shadow(color: .black.opacity(0.25), radius: 4, x: 0, y: 2)
-                            }
+                        if shouldShowLocationBanner {
+                            locationBanner
                         }
-                    }
 
-                    ForEach(visibleStopAnnotations) { stop in
-                        Annotation(stop.name, coordinate: stop.coord) {
-                            StopMarkerView(
-                                name: stop.name,
-                                isHighlighted: activeCoachMark == .zoomStops && stop.id == highlightedStopID
-                            ) {
-                                if let arrivals = vm.stopArrivals(for: stop.id) {
-                                    activeSheet = .stopArrivals(arrivals)
-                                }
-                            }
+                        if let liveStatusMessage = viewModel.liveStatusMessage {
+                            statusBanner(text: liveStatusMessage, tint: .orange)
                         }
-                    }
 
-                    ForEach(vm.displayedVehicles) { vehicle in
-                        Annotation(vehicle.route ?? "Bus", coordinate: vehicle.coord) {
-                            BusMarkerView(
-                                routeText: markerRouteText(for: vehicle),
-                                directionText: markerDirectionText(for: vehicle),
-                                heading: vehicle.heading,
-                                fillColor: markerFillColor(for: vehicle),
-                                strokeColor: markerStrokeColor(for: vehicle),
-                                glyphColor: markerGlyphColor(for: vehicle),
-                                labelTextColor: markerLabelTextColor(for: vehicle),
-                                labelBackgroundColor: markerLabelBackgroundColor(for: vehicle),
-                                opacity: vm.busLayerOpacity * markerOpacityMultiplier(for: vehicle),
-                                scale: markerScale(for: vehicle),
-                                scaleAnimationDuration: markerScalePolicy.animationDuration,
-                                isHighlighted: activeCoachMark == .tapBus && vehicle.id == highlightedVehicleID
-                            ) {
-                                handleBusTap(vehicle)
-                            }
+                        if !viewModel.searchResults.isEmpty {
+                            searchResultsPanel
                         }
+
+                        cardsSection
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 18)
                 }
-                .mapStyle(.standard(elevation: .realistic))
-                .onMapCameraChange { context in
-                    mapCenterCoordinate = context.camera.centerCoordinate
-                    mapCameraDistance = context.camera.distance
-                    updateMarkerScale(for: context.camera.distance)
-                    persistMapCameraIfNeeded(
-                        center: context.camera.centerCoordinate,
-                        distance: context.camera.distance
-                    )
-                    maybeShowCoachMarkZoomStops()
-                }
-                .ignoresSafeArea()
-
-                if isInitialStaticLoadInProgress {
-                    Color.black.opacity(0.16)
-                        .ignoresSafeArea()
-                        .allowsHitTesting(false)
-                }
-
-                VStack(alignment: .trailing, spacing: 8) {
-                    VStack(spacing: 10) {
-                        nextArrivalGlanceCard
-
-                        HStack(alignment: .center, spacing: 10) {
-                            searchEntryButton
-                            if shouldShowLocateMeButton {
-                                locateMeButton
-                                    .transition(.scale(scale: 0.92).combined(with: .opacity))
-                            }
-                        }
-                        .animation(.easeInOut(duration: 0.2), value: shouldShowLocateMeButton)
-                    }
-
-                    mapAttributionWatermark
-                }
-                .padding(.horizontal, 12)
-                .padding(.bottom, 8)
-
-                if isInitialStaticLoadInProgress {
-                    firstLaunchLoadingCard
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 18)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-
-                if let coachMark = activeCoachMark {
-                    coachMarkOverlay(for: coachMark)
-                }
-
-                if showLocationPriming {
-                    locationPrimingOverlay
-                }
+                .scrollDismissesKeyboard(.interactively)
             }
-            .navigationTitle("STM Bus Map")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        activeSheet = .settings
+                        viewModel.refreshManually()
                     } label: {
-                        Image(systemName: "gearshape")
-                    }
-                    .accessibilityLabel("Open settings")
-                }
-            }
-            .safeAreaInset(edge: .top) {
-                VStack(spacing: 8) {
-                    if vm.liveFeedStatusMessage == nil {
-                        HStack(spacing: 8) {
-//                            statusPill
-                            liveStatusPill
-                            Spacer()
-                            liveControlsComboBox
+                        if viewModel.isRefreshing {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.headline.weight(.semibold))
                         }
                     }
-
-                    if shouldShowLocationPermissionBanner {
-                        locationPermissionBanner
-                    }
-
-                    if let liveFeedStatusMessage = vm.liveFeedStatusMessage {
-                        outageStatusBanner(text: liveFeedStatusMessage)
-                    }
+                    .disabled(viewModel.isRefreshing)
+                    .accessibilityLabel("Refresh arrivals")
                 }
-                .padding(.horizontal, 12)
             }
         }
         .task {
-            searchVM.setSearchIndex(vm.searchIndex)
-            vm.loadIfNeeded()
-            vm.setScenePhase(scenePhase)
-            handleLocationStartup()
-            configureStartupCamera()
+            viewModel.loadIfNeeded()
+            viewModel.setScenePhase(scenePhase)
+            locationService.requestAccessAndStart()
         }
         .onChange(of: scenePhase) { _, newPhase in
-            vm.setScenePhase(newPhase)
+            viewModel.setScenePhase(newPhase)
         }
         .onChange(of: locationService.authorizationState) { _, newState in
-            handleLocationAuthorizationChange(newState)
-            maybeShowCoachMarkTapBus()
+            if newState.isAuthorized {
+                locationService.requestAccessAndStart()
+            }
         }
         .onReceive(locationService.$location) { location in
-            searchVM.updateUserLocation(location)
+            viewModel.updateUserLocation(location)
         }
-        .onReceive(locationService.$location.compactMap { $0 }) { location in
-            vm.updateUserLocation(location)
-            if !didCenterToUser {
-                centerMapOnUser(location)
-            }
-            maybeShowCoachMarkTapBus()
-        }
-        .onReceive(traceTimer) { _ in
-            guard !vm.selectedRouteShape.isEmpty else { return }
-            tracePhase = (tracePhase + 1) % 1000
-        }
-        .onReceive(freshnessTimer) { now in
-            freshnessReferenceDate = now
-        }
-        .onChange(of: vm.selectedBusDetail) { _, detail in
-            syncBusDetailSheet(with: detail)
-        }
-        .onChange(of: vm.phase) { _, phase in
-            if case .ready = phase {
-                restoreRouteSelectionIfNeeded()
-            }
-        }
-        .onChange(of: vm.selectedRouteID) { _, routeID in
-            persistedSelectedRouteID = routeID ?? ""
-        }
-        .onChange(of: vm.selectedRouteDirectionID) { _, directionID in
-            persistedSelectedRouteDirectionID = directionID ?? ""
-        }
-        .onChange(of: vm.displayedVehicles) { _, _ in
-            maybeShowCoachMarkTapBus()
-        }
-        .onChange(of: vm.lastVehicleRefreshAt) { oldValue, newValue in
-            guard newValue != nil, oldValue != newValue else { return }
-            liveRefreshSuccessCount += 1
-            maybeShowCoachMarkPauseLive()
-        }
-        .onReceive(vm.$searchIndex) { index in
-            searchVM.setSearchIndex(index)
-        }
-        .onChange(of: searchVM.selectedResult) { _, selectedResult in
-            guard let selectedResult else { return }
-            handleSearchSelection(selectedResult)
-            searchVM.clearSelection()
-        }
-        .sheet(
-            isPresented: searchSheetPresentedBinding,
-            onDismiss: {
-                searchVM.dismiss(clearQuery: false)
-                isSearchFieldFocused = false
-            }
-        ) {
-            searchSheet
-        }
-        .sheet(item: activeSheetBinding) { route in
-            sheetView(for: route)
-        }
-        .animation(.easeInOut(duration: 0.2), value: showLocationPriming)
-        .animation(.easeInOut(duration: 0.2), value: isInitialStaticLoadInProgress)
-        .animation(.easeInOut(duration: 0.2), value: activeCoachMark)
     }
 
-    private var activeSheetBinding: Binding<MapSheetRoute?> {
-        Binding(
-            get: { activeSheet },
-            set: { next in
-                if next == nil, activeSheet?.isBusDetail == true {
-                    vm.dismissBusDetail()
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Bus ETA")
+                .font(.system(.largeTitle, design: .rounded))
+                .fontWeight(.bold)
+                .foregroundStyle(.primary)
+            Text(viewModel.subtitleText)
+                .font(.subheadline)
+                .foregroundStyle(NearbyETATheme.secondaryText)
+        }
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(NearbyETATheme.secondaryText)
+
+            TextField("Search route or stop", text: $viewModel.query)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .focused($isSearchFocused)
+
+            if !viewModel.query.isEmpty {
+                Button {
+                    viewModel.clearSearch()
+                    isSearchFocused = false
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(NearbyETATheme.secondaryText)
                 }
-                activeSheet = next
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
             }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 13)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(NearbyETATheme.panel)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(NearbyETATheme.panelBorder, lineWidth: 1)
         )
     }
 
-    private var searchSheetPresentedBinding: Binding<Bool> {
-        Binding(
-            get: { searchVM.isPresented },
-            set: { isPresented in
-                if isPresented {
-                    searchVM.present()
+    private var shouldShowLocationBanner: Bool {
+        switch locationService.authorizationState {
+        case .authorized:
+            return false
+        case .notDetermined, .denied, .restricted:
+            return true
+        }
+    }
+
+    private var locationBanner: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Location unlocks nearby arrivals.")
+                .font(.headline)
+            Text(locationBannerBody)
+                .font(.subheadline)
+                .foregroundStyle(NearbyETATheme.secondaryText)
+
+            if locationService.authorizationState == .notDetermined {
+                Button("Allow Location Access") {
+                    locationService.requestAccessAndStart()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(NearbyETATheme.panel)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(NearbyETATheme.panelBorder, lineWidth: 1)
+        )
+    }
+
+    private var locationBannerBody: String {
+        switch locationService.authorizationState {
+        case .notDetermined:
+            return "The home screen uses your current location to load routes and stops closest to you."
+        case .denied, .restricted:
+            return "Location is currently unavailable. Search still works, but the nearby ETA feed cannot center on your actual position."
+        case .authorized:
+            return ""
+        }
+    }
+
+    private func statusBanner(text: String, tint: Color) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(tint)
+            Text(text)
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(NearbyETATheme.panel)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(tint.opacity(0.25), lineWidth: 1)
+        )
+    }
+
+    private var searchResultsPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Search Matches")
+                .font(.headline)
+            ForEach(viewModel.searchResults) { result in
+                Button {
+                    viewModel.selectSearchResult(result)
+                    isSearchFocused = false
+                } label: {
+                    SearchResultRow(result: result)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(NearbyETATheme.panel)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(NearbyETATheme.panelBorder, lineWidth: 1)
+        )
+    }
+
+    private var cardsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(viewModel.titleText)
+                        .font(.title3.weight(.semibold))
+                    if let lastUpdatedAt = viewModel.lastUpdatedAt {
+                        Text("Updated \(lastUpdatedAt.formatted(date: .omitted, time: .shortened))")
+                            .font(.caption)
+                            .foregroundStyle(NearbyETATheme.secondaryText)
+                    }
+                }
+                Spacer(minLength: 12)
+                if !viewModel.cards.isEmpty {
+                    Text("\(viewModel.cards.count)")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(NearbyETATheme.secondaryText)
+                }
+            }
+
+            switch viewModel.phase {
+            case .idle, .loading where viewModel.cards.isEmpty:
+                loadingPanel
+            case .error(let message):
+                statusBanner(text: message, tint: .red)
+            case .ready, .loading, .idle:
+                if viewModel.cards.isEmpty {
+                    emptyStatePanel
                 } else {
-                    searchVM.dismiss(clearQuery: false)
-                    isSearchFieldFocused = false
+                    ForEach(viewModel.cards) { card in
+                        ETACardView(card: card)
+                    }
                 }
             }
+        }
+    }
+
+    private var loadingPanel: some View {
+        HStack(spacing: 12) {
+            ProgressView()
+            Text("Loading transit data...")
+                .font(.subheadline)
+                .foregroundStyle(NearbyETATheme.secondaryText)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(NearbyETATheme.panel)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(NearbyETATheme.panelBorder, lineWidth: 1)
         )
     }
 
-    private var searchEntryButton: some View {
-        Button {
-            activeSheet = nil
-            searchSheetDetent = .medium
-            searchVM.present()
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .font(.headline.weight(.semibold))
-                Text("Search routes and stops")
-                    .font(.headline.weight(.semibold))
-                    .lineLimit(1)
-            }
-            .foregroundStyle(.primary)
-            .padding(.horizontal, 16)
-            .frame(minWidth: 200, minHeight: 54)
-            .background(Color.blue, in: Capsule())
-            .overlay(
-                Capsule()
-                    .stroke(Color.blue.opacity(0.35), lineWidth: 1)
-            )
-            .shadow(color: .black.opacity(0.14), radius: 4, x: 0, y: 2)
+    private var emptyStatePanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(emptyStateTitle)
+                .font(.headline)
+            Text(emptyStateBody)
+                .font(.subheadline)
+                .foregroundStyle(NearbyETATheme.secondaryText)
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Search routes and stops")
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(NearbyETATheme.panel)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(NearbyETATheme.panelBorder, lineWidth: 1)
+        )
     }
 
-    private var searchSheet: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(.secondary)
-                    TextField("Search routes and stops", text: $searchVM.query)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .submitLabel(.search)
-                        .focused($isSearchFieldFocused)
-                        .accessibilityLabel("Search routes and stops")
-                }
-                .padding(.horizontal, 12)
-                .frame(minHeight: 44)
-                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    private var emptyStateTitle: String {
+        switch locationService.authorizationState {
+        case .notDetermined, .denied, .restricted where viewModel.query.isEmpty:
+            return "Waiting for location"
+        default:
+            return "No arrivals found"
+        }
+    }
 
-                Button("Cancel") {
-                    searchVM.dismiss(clearQuery: true)
-                    isSearchFieldFocused = false
-                }
-                .font(.body.weight(.semibold))
-                .frame(minHeight: 44)
-                .accessibilityLabel("Cancel search")
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
-            .padding(.bottom, 10)
+    private var emptyStateBody: String {
+        switch locationService.authorizationState {
+        case .notDetermined, .denied, .restricted where viewModel.query.isEmpty:
+            return "Allow location access or search for a stop or route to load arrivals."
+        default:
+            return "Try a different route or stop, or refresh to pull the latest realtime data."
+        }
+    }
+}
 
-            Divider()
+private struct SearchResultRow: View {
+    let result: SearchResult
 
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
             Group {
-                if !searchVM.hasSearchIndex {
-                    VStack(spacing: 12) {
-                        ProgressView()
-                        Text("Route data is loading — try again in a moment")
-                            .font(.body)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding(.horizontal, 28)
-                } else if searchVM.isQueryEmpty {
-                    List {
-                        Section("Routes near you") {
-                            if locationService.location == nil {
-                                Text("Enable location in Settings to see nearby routes.")
-                                    .font(.body)
-                                    .foregroundStyle(.secondary)
-                                    .frame(minHeight: 44, alignment: .leading)
-                            } else if searchVM.nearbyRoutes.isEmpty {
-                                Text("No nearby routes right now.")
-                                    .font(.body)
-                                    .foregroundStyle(.secondary)
-                                    .frame(minHeight: 44, alignment: .leading)
-                            } else {
-                                ForEach(searchVM.nearbyRoutes) { match in
-                                    routeSearchRow(match, isNearbySuggestion: true)
-                                }
-                            }
-                        }
-                    }
-                    .listStyle(.plain)
-                } else if searchVM.isSearching {
-                    VStack(spacing: 12) {
-                        ProgressView()
-                        Text("Finding routes…")
-                            .font(.body)
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if searchVM.results.isEmpty {
-                    VStack(spacing: 12) {
-                        Image(systemName: "magnifyingglass")
-                            .font(.title2.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        Text("No routes found")
-                            .font(.title3.weight(.bold))
-                            .foregroundStyle(.primary)
-                        Text("Try a route number like 24, a street like Sherbrooke, or a stop name like Berri-UQAM")
-                            .font(.body)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding(.horizontal, 28)
-                } else {
-                    List {
-                        let routeMatches = searchVM.results.compactMap { result -> RouteSearchMatch? in
-                            if case .route(let route) = result {
-                                return route
-                            }
-                            return nil
-                        }
-                        let stopMatches = searchVM.results.compactMap { result -> StopSearchMatch? in
-                            if case .stop(let stop) = result {
-                                return stop
-                            }
-                            return nil
-                        }
-
-                        if !routeMatches.isEmpty {
-                            Section("Routes") {
-                                ForEach(routeMatches) { match in
-                                    routeSearchRow(match, isNearbySuggestion: false)
-                                }
-                            }
-                        }
-
-                        if !stopMatches.isEmpty {
-                            Section("Stops") {
-                                ForEach(stopMatches) { match in
-                                    stopSearchRow(match, isNearbySuggestion: false)
-                                }
-                            }
-                        }
-                    }
-                    .listStyle(.plain)
-                    .animation(.easeInOut(duration: 0.2), value: searchVM.results)
+                switch result {
+                case .route(let route):
+                    Text(route.route.routeShortName)
+                        .font(.subheadline.weight(.bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(routeChipColor(hex: route.route.routeColor), in: Capsule())
+                case .stop:
+                    Image(systemName: "mappin.and.ellipse")
+                        .font(.headline)
+                        .foregroundStyle(NearbyETATheme.accentFallback)
+                        .frame(width: 36, height: 36)
+                        .background(NearbyETATheme.accentFallback.opacity(0.12), in: Circle())
                 }
             }
-        }
-        .presentationDetents([.medium, .large], selection: $searchSheetDetent)
-        .presentationDragIndicator(.visible)
-        .onAppear {
-            searchSheetDetent = .medium
-            DispatchQueue.main.async {
-                isSearchFieldFocused = true
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(primaryText)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Text(secondaryText)
+                    .font(.caption)
+                    .foregroundStyle(NearbyETATheme.secondaryText)
             }
+
+            Spacer(minLength: 0)
         }
-        .onChange(of: isSearchFieldFocused) { _, focused in
-            if focused {
-                searchSheetDetent = .large
-            }
-        }
-        .accessibilityAddTraits(.isModal)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 2)
     }
 
-    private func routeSearchRow(_ match: RouteSearchMatch, isNearbySuggestion: Bool) -> some View {
-        Button {
-            searchVM.select(.route(match))
-        } label: {
-            HStack(alignment: .center, spacing: 12) {
-                RoundedRectangle(cornerRadius: 3, style: .continuous)
-                    .fill(routeChipColor(hex: match.route.routeColor))
-                    .frame(width: 10, height: 34)
-                    .accessibilityHidden(true)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(match.route.routeShortName)
-                        .font(.title2.weight(.bold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    if let direction = match.directionText?.trimmingCharacters(in: .whitespacesAndNewlines),
-                       !direction.isEmpty {
-                        Text(direction)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                }
-
-                Spacer(minLength: 8)
-
-                if isNearbySuggestion, let distanceText = distanceText(for: match.distanceMeters) {
-                    Text(distanceText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+    private var primaryText: String {
+        switch result {
+        case .route(let route):
+            if let directionText = route.directionText {
+                return "\(route.route.routeLongName) • \(directionText)"
             }
-            .frame(minHeight: 44, alignment: .leading)
-            .contentShape(Rectangle())
+            return route.route.routeLongName
+        case .stop(let stop):
+            return stop.stop.stopName
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(routeAccessibilityLabel(for: match, isNearbySuggestion: isNearbySuggestion))
     }
 
-    private func stopSearchRow(_ match: StopSearchMatch, isNearbySuggestion: Bool) -> some View {
-        Button {
-            searchVM.select(.stop(match))
-        } label: {
-            HStack(alignment: .center, spacing: 12) {
-                Image(systemName: "mappin.fill")
+    private var secondaryText: String {
+        switch result {
+        case .route:
+            return "Show arrivals for this route"
+        case .stop(let stop):
+            let routes = stop.stop.nearbyRouteIds.prefix(4).joined(separator: ", ")
+            return routes.isEmpty ? "Show arrivals for this stop" : "Routes \(routes)"
+        }
+    }
+}
+
+private struct ETACardView: View {
+    let card: NearbyETACard
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 14) {
+            VStack(spacing: 8) {
+                Text(card.routeShortName)
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .foregroundStyle(routeTextColor)
+                    .frame(minWidth: 62)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 10)
+                    .background(routeColor, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                Text(card.source.rawValue.uppercased())
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(routeColor)
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(card.directionText)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+
+                Text(card.stopName)
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 14)
+                    .foregroundStyle(NearbyETATheme.secondaryText)
+                    .lineLimit(1)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(match.stop.stopName)
-                        .font(.headline.weight(.bold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-
-                    if !match.stop.nearbyRouteIds.isEmpty {
-                        HStack(spacing: 4) {
-                            ForEach(Array(match.stop.nearbyRouteIds.prefix(4)), id: \.self) { routeID in
-                                Text(routeID)
-                                    .font(.caption2.weight(.semibold))
-                                    .foregroundStyle(.secondary)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color(.secondarySystemBackground), in: Capsule())
-                            }
-                        }
+                HStack(spacing: 8) {
+                    if let distanceText {
+                        Label(distanceText, systemImage: "location")
+                            .labelStyle(.titleAndIcon)
                     }
+                    Text(card.arrivalTime?.formatted(date: .omitted, time: .shortened) ?? "No time")
                 }
+                .font(.caption.weight(.medium))
+                .foregroundStyle(NearbyETATheme.secondaryText)
+            }
 
-                Spacer(minLength: 8)
+            Spacer(minLength: 12)
 
-                if isNearbySuggestion, let distanceText = distanceText(for: match.distanceMeters) {
-                    Text(distanceText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+            VStack(alignment: .trailing, spacing: 2) {
+                if let etaMinutes = card.etaMinutes {
+                    Text("\(etaMinutes)")
+                        .font(.system(size: 34, weight: .heavy, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.primary)
+                    Text("min")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(NearbyETATheme.secondaryText)
+                } else {
+                    Text("--")
+                        .font(.system(size: 34, weight: .heavy, design: .rounded))
+                        .foregroundStyle(.primary)
+                    Text("ETA")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(NearbyETATheme.secondaryText)
                 }
             }
-            .frame(minHeight: 44, alignment: .leading)
-            .contentShape(Rectangle())
+            .frame(minWidth: 58)
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(stopAccessibilityLabel(for: match, isNearbySuggestion: isNearbySuggestion))
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(NearbyETATheme.panel)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(NearbyETATheme.panelBorder, lineWidth: 1)
+        )
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(card.accessibilityLabel)
     }
 
-    private func routeChipColor(hex: String?) -> Color {
-        guard let hex else { return .blue }
-        let normalized = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+    private var routeColor: Color {
+        Color(hex: card.routeStyle?.routeColorHex) ?? NearbyETATheme.accentFallback
+    }
+
+    private var routeTextColor: Color {
+        Color(hex: card.routeStyle?.routeTextColorHex) ?? .white
+    }
+
+    private var distanceText: String? {
+        guard let distanceMeters = card.distanceMeters else { return nil }
+        if distanceMeters < 1000 {
+            return "\(distanceMeters)m"
+        }
+        return String(format: "%.1fkm", Double(distanceMeters) / 1000)
+    }
+}
+
+private func routeChipColor(hex: String?) -> Color {
+    Color(hex: hex) ?? NearbyETATheme.accentFallback
+}
+
+private extension Color {
+    init?(hex: String?) {
+        guard let hex else { return nil }
+        let normalized = hex
+            .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "#", with: "")
             .uppercased()
         guard normalized.count == 6, let value = Int(normalized, radix: 16) else {
-            return .blue
+            return nil
         }
 
         let red = Double((value >> 16) & 0xFF) / 255.0
         let green = Double((value >> 8) & 0xFF) / 255.0
         let blue = Double(value & 0xFF) / 255.0
-        return Color(red: red, green: green, blue: blue)
-    }
-
-    private func distanceText(for meters: Int?) -> String? {
-        guard let meters else { return nil }
-        if meters >= 1000 {
-            let kilometers = Double(meters) / 1000
-            return String(format: "%.1f km", kilometers)
-        }
-        return "\(meters) m"
-    }
-
-    private func routeAccessibilityLabel(for match: RouteSearchMatch, isNearbySuggestion: Bool) -> String {
-        var chunks: [String] = ["Route \(match.route.routeShortName)"]
-        if let direction = match.directionText?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !direction.isEmpty {
-            chunks.append(direction)
-        }
-        if isNearbySuggestion, let distance = distanceText(for: match.distanceMeters) {
-            chunks.append(distance)
-        }
-        return chunks.joined(separator: ", ")
-    }
-
-    private func stopAccessibilityLabel(for match: StopSearchMatch, isNearbySuggestion: Bool) -> String {
-        var chunks: [String] = ["Stop \(match.stop.stopName)"]
-        if !match.stop.nearbyRouteIds.isEmpty {
-            let routes = match.stop.nearbyRouteIds.joined(separator: ", ")
-            chunks.append("serving routes \(routes)")
-        }
-        if isNearbySuggestion, let distance = distanceText(for: match.distanceMeters) {
-            chunks.append(distance)
-        }
-        return chunks.joined(separator: ", ")
-    }
-
-    @ViewBuilder
-    private func sheetView(for route: MapSheetRoute) -> some View {
-        switch route {
-        case .todaySchedules:
-            todaySchedulesSheet
-                .presentationDetents([.medium, .large])
-        case .settings:
-            settingsSheet
-                .presentationDetents([.medium, .large])
-        case .helpTips:
-            helpTipsSheet
-                .presentationDetents([.medium, .large])
-        case .about:
-            aboutSheet
-                .presentationDetents([.medium, .large])
-        case .stopArrivals(let stopArrivals):
-            stopArrivalsSheet(for: stopArrivals)
-                .presentationDetents([.fraction(0.25), .medium, .large])
-        case .routeDetail(let detail):
-            busDetailSheet(for: detail)
-                .presentationDetents([.medium, .large])
-        case .busDetail(let detail):
-            busDetailSheet(for: detail)
-                .presentationDetents([.medium, .large])
-        }
-    }
-
-    private func presentTodaySchedules() {
-        vm.refreshSuggestionsForCurrentState()
-        activeSheet = .todaySchedules
-    }
-
-    private func syncBusDetailSheet(with detail: BusDetailPresentation?) {
-        guard let detail else {
-            if activeSheet?.isBusDetail == true {
-                activeSheet = nil
-            }
-            return
-        }
-
-        if activeSheet == nil || activeSheet?.isBusDetail == true {
-            activeSheet = .busDetail(detail)
-        }
-    }
-
-    private var nextArrivalGlanceCard: some View {
-        Button {
-            presentTodaySchedules()
-        } label: {
-            HStack(alignment: .center, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Next Bus")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-
-                    if let glance = vm.nextBusGlance {
-                        Text("\(glance.route) \(glance.directionText)")
-                            .font(.headline.weight(.semibold))
-                            .foregroundStyle(routeColor(for: glance.route))
-                            .lineLimit(1)
-                        Text(nextBusSupplementalLine(for: glance))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    } else {
-                        Text("Finding nearby arrivals...")
-                            .font(.headline.weight(.semibold))
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                        Text("Live ETA will appear here")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                }
-
-                Spacer(minLength: 8)
-
-                VStack(spacing: 0) {
-                    if let etaMinutes = vm.nextBusGlance?.etaMinutes {
-                        Text("\(etaMinutes)")
-                            .font(.system(size: 34, weight: .heavy, design: .rounded))
-                            .foregroundStyle(routeColor(for: vm.nextBusGlance?.route))
-                            .lineLimit(1)
-                        Text("min")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text("--")
-                            .font(.system(size: 34, weight: .heavy, design: .rounded))
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                        Text("ETA")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .frame(minWidth: 56)
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(
-                        Color.yellow.opacity(activeCoachMark == .nearbyArrivals ? 0.95 : 0),
-                        lineWidth: 2.6
-                    )
-            )
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(nextBusAccessibilityLabel())
-    }
-
-    private var statusPill: some View {
-        Group {
-            if !vm.statusMessage.isEmpty {
-                Text(vm.statusMessage)
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
-                    .background(.ultraThinMaterial, in: Capsule())
-            }
-        }
-    }
-
-    private var liveStatusPill: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            HStack(spacing: 6) {
-                LivePulseDot(isActive: !vm.isLiveUpdatesPaused)
-                Text(liveStatusText(at: context.date))
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.primary)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(.ultraThinMaterial, in: Capsule())
-        }
-    }
-
-    private var liveControlsComboBox: some View {
-        HStack(spacing: 0) {
-            Button {
-                vm.toggleLiveUpdatesPaused()
-            } label: {
-                Image(systemName: vm.isLiveUpdatesPaused ? "play.fill" : "pause.fill")
-                    .font(.subheadline.weight(.bold))
-                    .foregroundStyle(vm.isLiveUpdatesPaused ? Color.gray : Color.green)
-                    .frame(width: 44, height: 44)
-                    .overlay(
-                        Circle()
-                            .stroke(
-                                Color.yellow.opacity(activeCoachMark == .pauseLive ? 0.95 : 0),
-                                lineWidth: 2.6
-                            )
-                            .padding(4)
-                    )
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(vm.isLiveUpdatesPaused ? "Resume live tracking" : "Pause live tracking")
-
-            Rectangle()
-                .fill(Color.primary.opacity(0.2))
-                .frame(width: 1, height: 24)
-
-            Button {
-                vm.refreshLiveBuses()
-            } label: {
-                Image(systemName: "arrow.clockwise")
-                    .font(.subheadline.weight(.bold))
-                    .foregroundStyle(.primary)
-                    .rotationEffect(.degrees(vm.isRefreshing ? 360 : 0))
-                    .animation(
-                        vm.isRefreshing
-                        ? .linear(duration: 0.8).repeatForever(autoreverses: false)
-                        : .default,
-                        value: vm.isRefreshing
-                    )
-                    .frame(width: 44, height: 44)
-            }
-            .buttonStyle(.plain)
-            .disabled(vm.isRefreshing)
-            .accessibilityLabel("Refresh live buses")
-        }
-        .padding(.horizontal, 4)
-        .background(.ultraThinMaterial, in: Capsule())
-    }
-
-    private var visibleStopAnnotations: [MapStopPresentation] {
-        guard mapCameraDistance > 0, mapCameraDistance <= stopMarkerMaxVisibleDistance else { return [] }
-        let center = mapCenterCoordinate ?? locationService.location
-        return vm.visibleStops(
-            around: center,
-            maxDistanceMeters: stopMarkerRadiusMeters,
-            maxCount: stopMarkerMaxCount
-        )
-    }
-
-    private var shouldShowLocateMeButton: Bool {
-        guard let userLocation = locationService.location else { return false }
-        guard let mapCenterCoordinate else { return false }
-        let userPoint = CLLocation(latitude: userLocation.latitude, longitude: userLocation.longitude)
-        let centerPoint = CLLocation(latitude: mapCenterCoordinate.latitude, longitude: mapCenterCoordinate.longitude)
-        return centerPoint.distance(from: userPoint) > recenterVisibilityThresholdMeters
-    }
-
-    private var locateMeButton: some View {
-        Button {
-            guard let location = locationService.location else { return }
-            mapCamera = .region(
-                MKCoordinateRegion(
-                    center: location,
-                    span: MKCoordinateSpan(latitudeDelta: 0.02, longitudeDelta: 0.02)
-                )
-            )
-        } label: {
-            Image(systemName: "location.fill")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.primary)
-                .frame(width: 54, height: 54)
-                .background(.ultraThinMaterial, in: Circle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Go to current location")
-        .disabled(locationService.location == nil)
-    }
-
-    private func stopArrivalsSheet(for presentation: StopArrivalsPresentation) -> some View {
-        NavigationStack {
-            List {
-                Section {
-                    Text("Tap a route to view the full stop sequence and ETAs.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-
-                if presentation.arrivals.isEmpty {
-                    Section {
-                        Text("No arrivals available for this stop.")
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    Section("Next Arrivals") {
-                        ForEach(presentation.arrivals) { arrival in
-                            Button {
-                                openRouteDetailFromStop(arrival)
-                            } label: {
-                                HStack(alignment: .firstTextBaseline, spacing: 12) {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("\(arrival.route) \(arrival.directionText)")
-                                            .font(.headline)
-                                        Text(arrival.source.rawValue)
-                                            .font(.caption2.weight(.semibold))
-                                            .foregroundStyle(sourceColor(arrival.source))
-                                    }
-                                    Spacer()
-                                    Text(arrival.arrivalText ?? "--")
-                                        .font(.subheadline.weight(.semibold))
-                                        .foregroundStyle(.primary)
-                                }
-                                .padding(.vertical, 2)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-            }
-            .navigationTitle(presentation.stopName)
-            .navigationBarTitleDisplayMode(.inline)
-        }
-    }
-
-    private var todaySchedulesSheet: some View {
-        NavigationStack {
-            List {
-                Section {
-                    HStack(alignment: .center, spacing: 10) {
-                        Text("Nearby Arrivals")
-                            .font(.headline.weight(.semibold))
-
-                        Spacer()
-
-                        Text(arrivalsUpdatedText())
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-
-                        Button {
-                            refreshArrivalsContext()
-                        } label: {
-                            if vm.isRefreshing {
-                                ProgressView()
-                                    .controlSize(.small)
-                            } else {
-                                Image(systemName: "arrow.clockwise")
-                                    .font(.subheadline.weight(.semibold))
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(vm.isRefreshing)
-                        .accessibilityLabel("Refresh nearby arrivals")
-                    }
-                }
-
-                if let nextDeparture = nextDepartureSuggestion {
-                    Section("Next Departure") {
-                        nextDepartureCard(for: nextDeparture)
-                    }
-                }
-
-                switch arrivalsSheetState {
-                case .content(let suggestions):
-                    if !suggestions.isEmpty {
-                        Section("Nearby Buses") {
-                            ForEach(suggestions) { suggestion in
-                                arrivalRow(for: suggestion)
-                                    .padding(.vertical, 3)
-                            }
-                        }
-                    }
-                case .loading:
-                    Section {
-                        VStack(alignment: .leading, spacing: 8) {
-                            ProgressView()
-                            Text("Loading nearby arrivals...")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 6)
-                    }
-                case .error(let message):
-                    Section {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Label("Live arrival feed unavailable", systemImage: "exclamationmark.triangle.fill")
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(.orange)
-                            Text(message)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                            Button("Retry") {
-                                refreshArrivalsContext()
-                            }
-                            .font(.subheadline.weight(.semibold))
-                        }
-                        .padding(.vertical, 6)
-                    }
-                case .noMoreToday:
-                    Section {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("No more nearby departures today.")
-                                .font(.subheadline.weight(.semibold))
-                            Text("Try another stop, or check again later.")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                            Button("Retry") {
-                                refreshArrivalsContext()
-                            }
-                            .font(.subheadline.weight(.semibold))
-                        }
-                        .padding(.vertical, 6)
-                    }
-                case .empty:
-                    Section {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("No nearby arrivals right now.")
-                                .font(.subheadline.weight(.semibold))
-                            Text("Service may be limited at this time. Try refreshing or checking another stop.")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                            Button("Retry") {
-                                refreshArrivalsContext()
-                            }
-                            .font(.subheadline.weight(.semibold))
-                        }
-                        .padding(.vertical, 6)
-                    }
-                }
-
-                Section("Help") {
-                    Text("Nearby Arrivals uses live vehicle updates when available and falls back to scheduled context when live data is limited.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .navigationTitle("Nearby Arrivals")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        showArrivalsHelp = true
-                    } label: {
-                        Image(systemName: "questionmark.circle")
-                    }
-                    .accessibilityLabel("Arrivals help")
-                }
-            }
-            .alert("How Nearby Arrivals Works", isPresented: $showArrivalsHelp) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text("This view prioritizes live ETAs when available. If live data is limited, rows are shown with scheduled context.")
-            }
-        }
-    }
-
-    private var settingsSheet: some View {
-        NavigationStack {
-            Form {
-                Section("GTFS Data") {
-                    LabeledContent("Last updated", value: formattedLastUpdated(vm.gtfsCacheMetadata.lastUpdatedAt))
-                    LabeledContent("Feed validity", value: feedValidityText())
-                    if let feedVersion = vm.gtfsCacheMetadata.feedInfo?.feedVersion, !feedVersion.isEmpty {
-                        LabeledContent("Feed version", value: feedVersion)
-                    }
-
-                    HStack {
-                        Text("Staleness")
-                        Spacer()
-                        Circle()
-                            .fill(stalenessColor())
-                            .frame(width: 10, height: 10)
-                        Text(vm.gtfsStalenessLevel().label)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Button {
-                        vm.refreshStaticDataNow()
-                    } label: {
-                        HStack(spacing: 8) {
-                            if vm.isRefreshingStaticData {
-                                ProgressView()
-                                    .controlSize(.small)
-                            }
-                            Text(vm.isRefreshingStaticData ? "Updating..." : "Update Now")
-                        }
-                    }
-                    .disabled(vm.isRefreshingStaticData)
-
-                    Text(cacheStatusText())
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("Support") {
-                    Button {
-                        activeSheet = .helpTips
-                    } label: {
-                        Label("Help & Tips", systemImage: "questionmark.circle")
-                    }
-                }
-
-                Section {
-                    Button {
-                        activeSheet = .about
-                    } label: {
-                        Label("About", systemImage: "info.circle")
-                    }
-                }
-            }
-            .navigationTitle("Settings")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") {
-                        activeSheet = nil
-                    }
-                }
-            }
-        }
-    }
-
-    private var aboutSheet: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("App")
-                            .font(.headline)
-                        aboutMetadataRow(icon: "info.circle", label: "App name", value: appDisplayName)
-                        aboutMetadataRow(icon: "info.circle", label: "Version", value: appVersion)
-                        aboutMetadataRow(icon: "info.circle", label: "Build", value: appBuildNumber)
-                    }
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Data Sources")
-                            .font(.headline)
-                        aboutBodyRow(
-                            icon: "cylinder.split.1x2",
-                            text: "Transit data provided by the Société de transport de Montréal (STM)"
-                        )
-                        aboutBodyRow(
-                            icon: "cylinder.split.1x2",
-                            text: "Used under Creative Commons Attribution 4.0 (CC-BY) licence"
-                        )
-                        Button {
-                            openSTMDevelopersPage()
-                        } label: {
-                            HStack(alignment: .center, spacing: 10) {
-                                Image(systemName: "cylinder.split.1x2")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 18)
-                                Text("stm.info/en/about/developers")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.blue)
-                                Spacer(minLength: 8)
-                                Image(systemName: "arrow.up.right.square")
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(.secondary)
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                    }
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Legal")
-                            .font(.headline)
-                        aboutBodyRow(
-                            icon: "doc.plaintext",
-                            text: "Schedule and position data is for informational purposes only."
-                        )
-                        aboutBodyRow(
-                            icon: "doc.plaintext",
-                            text: "This app is not affiliated with or endorsed by the STM."
-                        )
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 20)
-            }
-            .navigationTitle("About")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") {
-                        activeSheet = nil
-                    }
-                }
-            }
-        }
-    }
-
-    private func aboutMetadataRow(icon: String, label: String, value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Image(systemName: icon)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .frame(width: 18)
-            Text(label)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 8)
-            Text(value)
-                .font(.subheadline)
-                .foregroundStyle(.primary)
-        }
-    }
-
-    private func aboutBodyRow(icon: String, text: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: icon)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .frame(width: 18)
-            Text(text)
-                .font(.subheadline)
-                .foregroundStyle(.primary)
-        }
-    }
-
-    private var appDisplayName: String {
-        let infoDictionary = Bundle.main.infoDictionary
-        if let displayName = infoDictionary?["CFBundleDisplayName"] as? String, !displayName.isEmpty {
-            return displayName
-        }
-        if let bundleName = infoDictionary?["CFBundleName"] as? String, !bundleName.isEmpty {
-            return bundleName
-        }
-        return "STM Bus Map"
-    }
-
-    private var appVersion: String {
-        let infoDictionary = Bundle.main.infoDictionary
-        return (infoDictionary?["CFBundleShortVersionString"] as? String) ?? "Unknown"
-    }
-
-    private var appBuildNumber: String {
-        let infoDictionary = Bundle.main.infoDictionary
-        return (infoDictionary?["CFBundleVersion"] as? String) ?? "Unknown"
-    }
-
-    private func openSTMDevelopersPage() {
-        guard let url = URL(string: "https://stm.info/en/about/developers") else { return }
-        openURL(url)
-    }
-
-    private var helpTipsSheet: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    tipsSection(
-                        title: "Finding your bus",
-                        items: [
-                            ("clock.arrow.circlepath", "Buses refresh every \(vm.liveRefreshIntervalSeconds) seconds automatically"),
-                            ("bus.fill", "Tap any bus on the map to see its route and stops")
-                        ]
-                    )
-
-                    tipsSection(
-                        title: "Reading the map",
-                        items: [
-                            ("circle.fill", "Bright bus markers have fresh position data"),
-                            ("circle.lefthalf.filled", "Faded markers mean position data is over 1 minute old"),
-                            ("antenna.radiowaves.left.and.right.slash", "If buses are not moving, live tracking may be unavailable"),
-                            ("calendar", "Scheduled times are still shown as a fallback")
-                        ]
-                    )
-
-                    tipsSection(
-                        title: "Checking arrivals",
-                        items: [
-                            ("list.bullet.rectangle", "Tap a bus to see its upcoming stop sequence"),
-                            ("leaf.fill", "Green times are live"),
-                            ("clock", "Grey times are scheduled estimates"),
-                            ("plus.magnifyingglass", "Zoom in on the map to see individual bus stops")
-                        ]
-                    )
-
-                    tipsSection(
-                        title: "Updating schedule data",
-                        items: [
-                            ("internaldrive", "Schedule data is cached locally and loads instantly after first use"),
-                            ("arrow.trianglehead.2.clockwise.rotate.90", "Data refreshes automatically on launch if it is outdated"),
-                            ("arrow.clockwise.circle", "Force update anytime in Settings under GTFS Data")
-                        ]
-                    )
-
-                    tipsSection(
-                        title: "Your location",
-                        items: [
-                            ("location.fill", "Used only to center the map and show nearby routes"),
-                            ("hand.raised.fill", "Never stored or shared")
-                        ]
-                    )
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 20)
-            }
-            .navigationTitle("Help & Tips")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") {
-                        activeSheet = nil
-                    }
-                }
-            }
-        }
-    }
-
-    private func busDetailSheet(for detail: BusDetailPresentation) -> some View {
-        NavigationStack {
-            List {
-                Section {
-                    LabeledContent("Route", value: "\(detail.route) \(detail.directionText)")
-                    LabeledContent("Data source", value: detail.source.rawValue)
-                }
-
-                if detail.rows.isEmpty {
-                    Section {
-                        Text("No stop predictions available.")
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    Section("Upcoming Stops") {
-                        ForEach(detail.rows) { row in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(row.stopName)
-                                    .font(.headline)
-                                Text(stopTimeText(for: row))
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                                Text(row.source.rawValue)
-                                    .font(.caption2.weight(.semibold))
-                                    .foregroundStyle(sourceColor(row.source))
-                            }
-                            .padding(.vertical, 2)
-                        }
-                    }
-                }
-            }
-            .navigationTitle("Bus Details")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") {
-                        if vm.selectedBusDetail?.id == detail.id {
-                            vm.dismissBusDetail()
-                        }
-                        activeSheet = nil
-                    }
-                }
-            }
-        }
-    }
-
-    private func tipsSection(title: String, items: [(icon: String, text: String)]) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title)
-                .font(.headline)
-            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: item.icon)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 18)
-                    Text(item.text)
-                        .font(.subheadline)
-                        .foregroundStyle(.primary)
-                }
-            }
-        }
-    }
-
-    private var firstLaunchLoadingCard: some View {
-        HStack(spacing: 10) {
-            ProgressView()
-                .controlSize(.small)
-            Text("Loading Montreal bus data…")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.primary)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-    }
-
-    private var mapAttributionWatermark: some View {
-        Text("Data © STM")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .opacity(0.6)
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
-    }
-
-    private var locationPermissionBanner: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "location.slash")
-                .foregroundStyle(.secondary)
-            Text("Enable location to see nearby buses")
-                .font(.subheadline.weight(.semibold))
-                .lineLimit(1)
-            Spacer(minLength: 8)
-            Button("Settings") {
-                openSystemSettings()
-            }
-            .font(.subheadline.weight(.semibold))
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .background(Color.orange.opacity(0.15), in: Capsule())
-    }
-
-    private func outageStatusBanner(text: String) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.subheadline.weight(.bold))
-                .foregroundStyle(.white)
-            Text(text)
-                .font(.subheadline.weight(.bold))
-                .foregroundStyle(.white)
-                .lineLimit(2)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(
-            Color.red.opacity(0.92),
-            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.white.opacity(0.35), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.28), radius: 6, x: 0, y: 3)
-    }
-
-    private var locationPrimingOverlay: some View {
-        ZStack {
-            Color.black.opacity(0.35)
-                .ignoresSafeArea()
-
-            VStack(spacing: 16) {
-                Image(systemName: "location.viewfinder")
-                    .font(.system(size: 30, weight: .semibold))
-                    .foregroundStyle(.blue)
-                    .padding(12)
-                    .background(Color.blue.opacity(0.12), in: Circle())
-
-                Text("See buses near you")
-                    .font(.title3.weight(.semibold))
-
-                Text("Location helps center nearby buses. Your location is never stored or shared.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-
-                Button("Allow Location Access") {
-                    hasCompletedLocationPriming = true
-                    hasRequestedLocationPermission = true
-                    showLocationPriming = false
-                    locationService.requestPermission()
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-
-                Button("Skip for now") {
-                    hasCompletedLocationPriming = true
-                    hasRequestedLocationPermission = false
-                    showLocationPriming = false
-                }
-                .buttonStyle(.plain)
-                .font(.subheadline.weight(.semibold))
-            }
-            .padding(20)
-            .frame(maxWidth: 360)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .padding(.horizontal, 20)
-        }
-        .transition(.opacity)
-    }
-
-    private func coachMarkOverlay(for coachMark: CoachMarkKind) -> some View {
-        ZStack {
-            Color.black.opacity(0.001)
-                .ignoresSafeArea()
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    dismissCoachMark()
-                }
-
-            VStack {
-                Spacer()
-                Text(coachMark.text)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 11)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .stroke(Color.yellow.opacity(0.65), lineWidth: 1.2)
-                    )
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 120)
-            }
-        }
-        .transition(.opacity)
-    }
-
-    private var sortedUpcomingSuggestions: [BusSuggestion] {
-        let now = Date()
-        return vm.nearbyScheduleSuggestions
-            .filter { suggestion in
-                guard let arrivalAt = suggestion.estimatedArrivalAt else { return true }
-                return arrivalAt >= now
-            }
-    }
-
-    private var nextDepartureSuggestion: BusSuggestion? {
-        sortedUpcomingSuggestions.first(where: { $0.etaMinutes != nil }) ?? sortedUpcomingSuggestions.first
-    }
-
-    private var remainingDepartureSuggestions: [BusSuggestion] {
-        guard let nextDepartureSuggestion else { return [] }
-        return sortedUpcomingSuggestions.filter { $0.id != nextDepartureSuggestion.id }
-    }
-
-    private var arrivalsSheetState: ArrivalsSheetState {
-        if case .error(let message) = vm.phase {
-            return .error(message)
-        }
-        if vm.isRefreshing && vm.nearbyScheduleSuggestions.isEmpty {
-            return .loading
-        }
-
-        let now = Date()
-        let timedSuggestions = vm.nearbyScheduleSuggestions.filter { $0.estimatedArrivalAt != nil }
-        if !timedSuggestions.isEmpty &&
-            timedSuggestions.filter({ ($0.estimatedArrivalAt ?? .distantFuture) >= now }).isEmpty {
-            return .noMoreToday
-        }
-
-        if sortedUpcomingSuggestions.isEmpty {
-            return .empty
-        }
-        return .content(remainingDepartureSuggestions)
-    }
-
-    private func arrivalsUpdatedText() -> String {
-        if vm.isRefreshing {
-            return "Updating..."
-        }
-        guard let last = vm.lastVehicleRefreshAt else {
-            return "Waiting for live feed"
-        }
-        let seconds = max(0, Int(Date().timeIntervalSince(last)))
-        return "Updated \(seconds)s ago"
-    }
-
-    private func nextDepartureCard(for suggestion: BusSuggestion) -> some View {
-        HStack(alignment: .center, spacing: 14) {
-            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .fill(routeColor(for: suggestion.route))
-                .frame(width: 7, height: 44)
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text("\(suggestion.route) \(suggestion.displayDirection)")
-                    .font(.headline.weight(.semibold))
-                if let stop = suggestion.nearestStopName, !stop.isEmpty {
-                    Text(stop)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                arrivalSourceBadge(suggestion.source)
-            }
-
-            Spacer(minLength: 10)
-
-            VStack(alignment: .trailing, spacing: 1) {
-                Text(primaryEtaText(for: suggestion))
-                    .font(.system(size: 30, weight: .heavy, design: .rounded))
-                    .monospacedDigit()
-                Text(arrivalClockText(for: suggestion))
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(.vertical, 6)
-    }
-
-    private func arrivalRow(for suggestion: BusSuggestion) -> some View {
-        HStack(alignment: .center, spacing: 12) {
-            RoundedRectangle(cornerRadius: 3, style: .continuous)
-                .fill(routeColor(for: suggestion.route))
-                .frame(width: 6, height: 36)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text("\(suggestion.route) \(suggestion.displayDirection)")
-                    .font(.subheadline.weight(.semibold))
-                if let stop = suggestion.nearestStopName, !stop.isEmpty {
-                    Text(stop)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                arrivalSourceBadge(suggestion.source)
-            }
-
-            Spacer(minLength: 8)
-
-            VStack(alignment: .trailing, spacing: 1) {
-                Text(primaryEtaText(for: suggestion))
-                    .font(.title3.weight(.heavy))
-                    .monospacedDigit()
-                Text(arrivalClockText(for: suggestion))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(.horizontal, 4)
-        .frame(minHeight: 52)
-        .listRowBackground(isImminentArrival(suggestion) ? Color.orange.opacity(0.14) : Color.clear)
-    }
-
-    private func primaryEtaText(for suggestion: BusSuggestion) -> String {
-        if let eta = suggestion.etaMinutes {
-            return "\(eta)m"
-        }
-        return "--"
-    }
-
-    private func arrivalClockText(for suggestion: BusSuggestion) -> String {
-        guard let date = suggestion.estimatedArrivalAt else { return "Time unavailable" }
-        return date.formatted(date: .omitted, time: .shortened)
-    }
-
-    private func isImminentArrival(_ suggestion: BusSuggestion) -> Bool {
-        guard let eta = suggestion.etaMinutes else { return false }
-        return eta <= 5
-    }
-
-    private func arrivalSourceBadge(_ source: StopTimeSourceLabel) -> some View {
-        Text(source.rawValue)
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(sourceColor(source))
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2)
-            .background(sourceColor(source).opacity(0.15), in: Capsule())
-    }
-
-    private func liveStatusText(at now: Date) -> String {
-        if vm.isLiveUpdatesPaused {
-            return "Paused"
-        }
-        guard let last = vm.lastVehicleRefreshAt else {
-            return "Waiting for live feed..."
-        }
-        let seconds = max(0, Int(now.timeIntervalSince(last)))
-        return "Updated \(seconds)s ago"
-    }
-
-    private func stopTimeText(for row: BusDetailStopRow) -> String {
-        var chunks: [String] = []
-        if let arrival = row.arrivalText {
-            chunks.append("Arrive \(arrival)")
-        }
-        if let departure = row.departureText {
-            chunks.append("Depart \(departure)")
-        }
-        if chunks.isEmpty {
-            return "No time available"
-        }
-        return chunks.joined(separator: " • ")
-    }
-
-    private func markerRouteText(for vehicle: VehiclePosition) -> String {
-        vehicle.route ?? "--"
-    }
-
-    private func markerDirectionText(for vehicle: VehiclePosition) -> String {
-        vm.directionText(for: vehicle)
-    }
-
-    private func nextBusSupplementalLine(for glance: NextBusGlance) -> String {
-        var chunks: [String] = []
-        if let stop = glance.nearestStopName, !stop.isEmpty {
-            chunks.append(stop)
-        }
-        if let metersAway = glance.metersAway {
-            chunks.append("\(metersAway)m away")
-        }
-        if chunks.isEmpty {
-            return "Tap for full arrivals"
-        }
-        return chunks.joined(separator: " • ")
-    }
-
-    private func nextBusAccessibilityLabel() -> String {
-        guard let glance = vm.nextBusGlance else {
-            return "Next bus ETA loading"
-        }
-
-        if let eta = glance.etaMinutes {
-            return "Next bus route \(glance.route), \(glance.directionText), arriving in \(eta) minutes"
-        }
-        return "Next bus route \(glance.route), \(glance.directionText), ETA unavailable"
-    }
-
-    private func openRouteDetailFromStop(_ arrival: StopArrivalPresentation) {
-        guard let detail = vm.routeDetail(route: arrival.route, directionID: arrival.directionID) else { return }
-        activeSheet = .routeDetail(detail)
-    }
-
-    private func markerScale(for vehicle: VehiclePosition) -> CGFloat {
-        markerScalePolicy.composedScale(
-            baseScale: markerZoomScale,
-            isSelected: vm.selectedBusID == vehicle.id
-        )
-    }
-
-    private var selectedRouteColor: Color {
-        routeColor(for: vm.selectedRouteID)
-    }
-
-    private var selectedRouteTextColor: Color {
-        let preferred = routeTextColor(for: vm.selectedRouteID)
-        return ContrastAccessibility.readableTextColor(preferred: preferred, on: selectedRouteColor)
-    }
-
-    private func routeColor(for routeID: String?) -> Color {
-        TransitColorResolver.routeColor(style: vm.routeStyle(for: routeID))
-    }
-
-    private func routeTextColor(for routeID: String?) -> Color {
-        TransitColorResolver.routeTextColor(style: vm.routeStyle(for: routeID))
-    }
-
-    private func sourceColor(_ source: StopTimeSourceLabel) -> Color {
-        switch source {
-        case .live:
-            return TransitSemanticPalette.liveSource
-        case .scheduled:
-            return TransitSemanticPalette.scheduledSource
-        }
-    }
-
-    private func markerFillColor(for vehicle: VehiclePosition) -> Color {
-        let routeColor = routeColor(for: vehicle.route)
-        switch vm.freshnessLevel(for: vehicle, referenceDate: freshnessReferenceDate) {
-        case .live:
-            return routeColor.opacity(0.94)
-        case .aging:
-            return routeColor.opacity(0.78)
-        case .stale:
-            return routeColor.opacity(0.58)
-        }
-    }
-
-    private func markerStrokeColor(for vehicle: VehiclePosition) -> Color {
-        switch vm.freshnessLevel(for: vehicle, referenceDate: freshnessReferenceDate) {
-        case .live:
-            return TransitSemanticPalette.liveFreshness
-        case .aging:
-            return TransitSemanticPalette.agingFreshness
-        case .stale:
-            return TransitSemanticPalette.staleFreshness
-        }
-    }
-
-    private func markerGlyphColor(for vehicle: VehiclePosition) -> Color {
-        let preferred = routeTextColor(for: vehicle.route)
-        return ContrastAccessibility.readableTextColor(
-            preferred: preferred,
-            on: markerFillColor(for: vehicle)
-        )
-    }
-
-    private func markerLabelTextColor(for vehicle: VehiclePosition) -> Color {
-        let preferred = routeTextColor(for: vehicle.route)
-        return ContrastAccessibility.readableTextColor(
-            preferred: preferred,
-            on: markerLabelBackgroundColor(for: vehicle)
-        )
-    }
-
-    private func markerLabelBackgroundColor(for vehicle: VehiclePosition) -> Color {
-        let routeColor = routeColor(for: vehicle.route)
-        switch vm.freshnessLevel(for: vehicle, referenceDate: freshnessReferenceDate) {
-        case .live:
-            return routeColor.opacity(0.94)
-        case .aging:
-            return routeColor.opacity(0.78)
-        case .stale:
-            return routeColor.opacity(0.62)
-        }
-    }
-
-    private func markerOpacityMultiplier(for vehicle: VehiclePosition) -> Double {
-        switch vm.freshnessLevel(for: vehicle, referenceDate: freshnessReferenceDate) {
-        case .live:
-            return 1.0
-        case .aging:
-            return 0.8
-        case .stale:
-            return 0.62
-        }
-    }
-
-    private func updateMarkerScale(for distance: CLLocationDistance) {
-        let nextScale = markerScalePolicy.scale(forAltitude: distance)
-        guard markerScalePolicy.shouldApplyScale(current: markerZoomScale, next: nextScale) else { return }
-        markerZoomScale = nextScale
-    }
-
-    private func formattedLastUpdated(_ date: Date?) -> String {
-        guard let date else { return "Never" }
-        return date.formatted(date: .abbreviated, time: .shortened)
-    }
-
-    private func feedValidityText() -> String {
-        guard let feedInfo = vm.gtfsCacheMetadata.feedInfo else { return "Unknown" }
-        let start = feedInfo.feedStartDate?.formatted(date: .abbreviated, time: .omitted) ?? "--"
-        let end = feedInfo.feedEndDate?.formatted(date: .abbreviated, time: .omitted) ?? "--"
-        return "\(start) to \(end)"
-    }
-
-    private func stalenessColor() -> Color {
-        switch vm.gtfsStalenessLevel() {
-        case .fresh:
-            return .green
-        case .warning:
-            return .yellow
-        case .expired:
-            return .red
-        }
-    }
-
-    private func cacheStatusText() -> String {
-        if vm.isRefreshingStaticData {
-            return "Updating..."
-        }
-        if !vm.staticDataRefreshStatus.isEmpty {
-            return vm.staticDataRefreshStatus
-        }
-        if vm.gtfsCacheMetadata.lastUpdatedAt == nil {
-            return "No local cache found yet."
-        }
-        return "Up to date"
-    }
-
-    private var isInitialStaticLoadInProgress: Bool {
-        guard vm.gtfsCacheMetadata.lastUpdatedAt == nil else { return false }
-        if case .loading = vm.phase {
-            return true
-        }
-        return false
-    }
-
-    private var shouldShowLocationPermissionBanner: Bool {
-        locationService.authorizationState == .denied || locationService.authorizationState == .restricted
-    }
-
-    private var highlightedVehicleID: String? {
-        guard activeCoachMark == .tapBus else { return nil }
-        return nearestVehicleIDForCoachMark()
-    }
-
-    private var highlightedStopID: String? {
-        guard activeCoachMark == .zoomStops else { return nil }
-        return visibleStopAnnotations.first?.id
-    }
-
-    private func refreshArrivalsContext() {
-        vm.refreshLiveBuses()
-        vm.refreshSuggestionsForCurrentState()
-    }
-
-    private func handleSearchSelection(_ selectedResult: SearchResult) {
-        searchVM.dismiss(clearQuery: true)
-        isSearchFieldFocused = false
-
-        guard let response = vm.applySearchSelection(selectedResult) else { return }
-        switch response {
-        case .route(let shape, let detail):
-            centerMapOnRoute(shape)
-            if let detail {
-                activeSheet = .routeDetail(detail)
-            }
-        case .stop(let coordinate, let arrivals):
-            centerMapOnCoordinate(coordinate)
-            if let arrivals {
-                activeSheet = .stopArrivals(arrivals)
-            }
-        }
-    }
-
-    private func centerMapOnRoute(_ coordinates: [CLLocationCoordinate2D]) {
-        guard !coordinates.isEmpty else { return }
-
-        var minLatitude = coordinates[0].latitude
-        var maxLatitude = coordinates[0].latitude
-        var minLongitude = coordinates[0].longitude
-        var maxLongitude = coordinates[0].longitude
-
-        for coordinate in coordinates.dropFirst() {
-            minLatitude = min(minLatitude, coordinate.latitude)
-            maxLatitude = max(maxLatitude, coordinate.latitude)
-            minLongitude = min(minLongitude, coordinate.longitude)
-            maxLongitude = max(maxLongitude, coordinate.longitude)
-        }
-
-        let center = CLLocationCoordinate2D(
-            latitude: (minLatitude + maxLatitude) / 2,
-            longitude: (minLongitude + maxLongitude) / 2
-        )
-        let latitudeDelta = max((maxLatitude - minLatitude) * 1.35, 0.01)
-        let longitudeDelta = max((maxLongitude - minLongitude) * 1.35, 0.01)
-
-        didCenterToUser = true
-        mapCamera = .region(
-            MKCoordinateRegion(
-                center: center,
-                span: MKCoordinateSpan(latitudeDelta: latitudeDelta, longitudeDelta: longitudeDelta)
-            )
-        )
-    }
-
-    private func centerMapOnCoordinate(_ coordinate: CLLocationCoordinate2D) {
-        didCenterToUser = true
-        mapCamera = .region(
-            MKCoordinateRegion(
-                center: coordinate,
-                span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
-            )
-        )
-    }
-
-    private func centerMapOnUser(_ coordinate: CLLocationCoordinate2D) {
-        didCenterToUser = true
-        mapCamera = .region(
-            MKCoordinateRegion(
-                center: coordinate,
-                span: MKCoordinateSpan(latitudeDelta: 0.03, longitudeDelta: 0.03)
-            )
-        )
-    }
-
-    private func handleBusTap(_ vehicle: VehiclePosition) {
-        vm.selectBus(vehicle)
-        maybeShowCoachMarkNearbyArrivals()
-    }
-
-    private func handleLocationStartup() {
-        switch locationService.authorizationState {
-        case .authorized:
-            hasRequestedLocationPermission = true
-            showLocationPriming = false
-            locationService.requestAccessAndStart()
-        case .notDetermined:
-            if hasCompletedLocationPriming {
-                showLocationPriming = false
-                if hasRequestedLocationPermission {
-                    locationService.requestPermission()
-                }
-            } else {
-                showLocationPriming = true
-            }
-        case .denied, .restricted:
-            showLocationPriming = false
-            searchVM.updateUserLocation(nil)
-        }
-    }
-
-    private func configureStartupCamera() {
-        let decision = LaunchCameraPolicy.decision(
-            currentLocationAvailable: locationService.location != nil,
-            hasPersistedCamera: hasPersistedMapCamera
-        )
-
-        switch decision {
-        case .centerOnUser:
-            guard let userLocation = locationService.location else { return }
-            centerMapOnUser(userLocation)
-        case .restorePersisted:
-            restoreMapCameraIfNeeded()
-        case .none:
-            break
-        }
-    }
-
-    private func handleLocationAuthorizationChange(_ state: LocationAuthorizationState) {
-        switch state {
-        case .authorized:
-            showLocationPriming = false
-            hasRequestedLocationPermission = true
-            locationService.requestAccessAndStart()
-        case .notDetermined:
-            if hasCompletedLocationPriming {
-                showLocationPriming = false
-            }
-        case .denied, .restricted:
-            showLocationPriming = false
-            searchVM.updateUserLocation(nil)
-        }
-    }
-
-    private func restoreMapCameraIfNeeded() {
-        guard hasPersistedMapCamera else { return }
-        let center = CLLocationCoordinate2D(
-            latitude: persistedMapCenterLatitude,
-            longitude: persistedMapCenterLongitude
-        )
-        guard CLLocationCoordinate2DIsValid(center), persistedMapCameraDistance > 0 else { return }
-        mapCamera = .camera(
-            MapCamera(
-                centerCoordinate: center,
-                distance: persistedMapCameraDistance,
-                heading: 0,
-                pitch: 0
-            )
-        )
-        mapCenterCoordinate = center
-        mapCameraDistance = persistedMapCameraDistance
-    }
-
-    private func persistMapCameraIfNeeded(center: CLLocationCoordinate2D, distance: CLLocationDistance) {
-        guard CLLocationCoordinate2DIsValid(center), distance > 0 else { return }
-        let now = Date()
-        guard now.timeIntervalSince(lastMapPersistAt) >= mapPersistInterval else { return }
-
-        if hasPersistedMapCamera {
-            let previousCenter = CLLocation(latitude: persistedMapCenterLatitude, longitude: persistedMapCenterLongitude)
-            let currentCenter = CLLocation(latitude: center.latitude, longitude: center.longitude)
-            let movedDistance = currentCenter.distance(from: previousCenter)
-            let zoomDelta = abs(persistedMapCameraDistance - distance)
-            guard movedDistance >= mapPersistDistanceThreshold || zoomDelta >= mapPersistZoomThreshold else { return }
-        }
-
-        persistedMapCenterLatitude = center.latitude
-        persistedMapCenterLongitude = center.longitude
-        persistedMapCameraDistance = distance
-        hasPersistedMapCamera = true
-        lastMapPersistAt = now
-    }
-
-    private func restoreRouteSelectionIfNeeded() {
-        guard !hasRestoredRouteSelection else { return }
-        hasRestoredRouteSelection = true
-
-        let routeID = persistedSelectedRouteID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !routeID.isEmpty else { return }
-        let direction = persistedSelectedRouteDirectionID.trimmingCharacters(in: .whitespacesAndNewlines)
-        let directionID = direction.isEmpty ? nil : direction
-        vm.restoreRouteSelection(routeID: routeID, directionID: directionID)
-    }
-
-    private func maybeShowCoachMarkTapBus() {
-        guard activeCoachMark == nil,
-              !hasShownCoachTapBus,
-              locationService.authorizationState.isAuthorized,
-              !vm.displayedVehicles.isEmpty else { return }
-        hasShownCoachTapBus = true
-        activeCoachMark = .tapBus
-    }
-
-    private func maybeShowCoachMarkZoomStops() {
-        guard activeCoachMark == nil,
-              !hasShownCoachZoomStops,
-              !visibleStopAnnotations.isEmpty else { return }
-        hasShownCoachZoomStops = true
-        activeCoachMark = .zoomStops
-    }
-
-    private func maybeShowCoachMarkPauseLive() {
-        guard activeCoachMark == nil,
-              !hasShownCoachPauseLive,
-              liveRefreshSuccessCount >= 2 else { return }
-        hasShownCoachPauseLive = true
-        activeCoachMark = .pauseLive
-    }
-
-    private func maybeShowCoachMarkNearbyArrivals() {
-        guard activeCoachMark == nil, !hasShownCoachNearbyArrivals else { return }
-        hasShownCoachNearbyArrivals = true
-        activeCoachMark = .nearbyArrivals
-    }
-
-    private func dismissCoachMark() {
-        guard activeCoachMark != nil else { return }
-        self.activeCoachMark = nil
-    }
-
-    private func nearestVehicleIDForCoachMark() -> String? {
-        if let userLocation = locationService.location {
-            let userPoint = CLLocation(latitude: userLocation.latitude, longitude: userLocation.longitude)
-            return vm.displayedVehicles.min(by: { lhs, rhs in
-                let lhsLocation = CLLocation(latitude: lhs.coord.latitude, longitude: lhs.coord.longitude)
-                let rhsLocation = CLLocation(latitude: rhs.coord.latitude, longitude: rhs.coord.longitude)
-                return lhsLocation.distance(from: userPoint) < rhsLocation.distance(from: userPoint)
-            })?.id
-        }
-        return vm.displayedVehicles.first?.id
-    }
-
-    private func openSystemSettings() {
-        guard let settingsURL = URL(string: UIApplication.openSettingsURLString) else { return }
-        openURL(settingsURL)
-    }
-
-    private func traceArrowPoints() -> [TraceArrowPoint] {
-        let shape = vm.selectedRouteShape
-        guard shape.count > 5 else { return [] }
-
-        let spacing = max(shape.count / 7, 1)
-        let offset = tracePhase % spacing
-
-        var points: [TraceArrowPoint] = []
-        var index = offset
-        var id = 0
-        while index + 1 < shape.count {
-            let current = shape[index]
-            let next = shape[min(index + 1, shape.count - 1)]
-            let angle = bearing(from: current, to: next)
-            points.append(TraceArrowPoint(id: id, coord: current, angle: angle))
-            id += 1
-            index += spacing
-        }
-
-        return points
-    }
-
-    private func bearing(from start: CLLocationCoordinate2D, to end: CLLocationCoordinate2D) -> Double {
-        let lat1 = start.latitude * .pi / 180
-        let lon1 = start.longitude * .pi / 180
-        let lat2 = end.latitude * .pi / 180
-        let lon2 = end.longitude * .pi / 180
-        let dLon = lon2 - lon1
-
-        let y = sin(dLon) * cos(lat2)
-        let x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon)
-        let radians = atan2(y, x)
-        return radians * 180 / .pi
+        self.init(red: red, green: green, blue: blue)
     }
 }
