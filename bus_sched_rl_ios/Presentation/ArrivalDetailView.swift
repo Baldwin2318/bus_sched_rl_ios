@@ -49,20 +49,54 @@ struct ArrivalDetailModel: Equatable {
 
 struct ArrivalDetailView: View {
     @ObservedObject var viewModel: NearbyETAViewModel
+    @ObservedObject var locationService: LocationService
     let initialCard: NearbyETACard
+    @State private var isDetailRefreshActive = false
 
     private var currentCard: NearbyETACard {
-        viewModel.cards.first(where: { $0.id == initialCard.id }) ?? initialCard
+        viewModel.cardDetail(for: initialCard)
     }
 
     private var model: ArrivalDetailModel {
         ArrivalDetailModel(card: currentCard)
     }
 
+    private var liveVehicle: VehiclePosition? {
+        viewModel.liveVehicle(for: currentCard)
+    }
+
+    private var liveMapModel: ArrivalLiveMapModel? {
+        viewModel.arrivalLiveMapModel(
+            for: currentCard,
+            userLocation: locationService.location
+        )
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 ETACardView(card: currentCard)
+
+                if let liveMapModel {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Live map")
+                            .font(.title3.weight(.semibold))
+                        Text("Shows your live location, this stop, and the live bus path. Only the bus refreshes every 10 seconds.")
+                            .font(.subheadline)
+                            .foregroundStyle(NearbyETATheme.secondaryText)
+                        ArrivalLiveMapView(model: liveMapModel)
+                    }
+                    .padding(18)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .fill(NearbyETATheme.panel)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .stroke(NearbyETATheme.panelBorder, lineWidth: 1)
+                    )
+                }
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text(model.sourceTitle)
@@ -112,6 +146,18 @@ struct ArrivalDetailView: View {
         .navigationTitle("Arrival details")
         .navigationBarTitleDisplayMode(.inline)
         .accessibilityIdentifier("arrival-detail-screen")
+        .onAppear {
+            syncDetailRefreshState()
+        }
+        .onDisappear {
+            if isDetailRefreshActive {
+                viewModel.endDetailRefresh()
+                isDetailRefreshActive = false
+            }
+        }
+        .onChange(of: currentCard.source) { _, _ in
+            syncDetailRefreshState()
+        }
     }
 
     private func detailRow(title: String, value: String) -> some View {
@@ -124,5 +170,17 @@ struct ArrivalDetailView: View {
                 .foregroundStyle(.primary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func syncDetailRefreshState() {
+        let shouldRefresh = currentCard.source == .live
+        guard shouldRefresh != isDetailRefreshActive else { return }
+
+        if shouldRefresh {
+            viewModel.beginDetailRefresh()
+        } else {
+            viewModel.endDetailRefresh()
+        }
+        isDetailRefreshActive = shouldRefresh
     }
 }

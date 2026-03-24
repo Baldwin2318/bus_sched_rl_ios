@@ -69,7 +69,32 @@ struct GTFSStaticData {
     let routeDirectionLabels: [RouteKey: String]
     let routeNamesByRouteID: [String: GTFSRouteName]
     let routeStylesByRouteID: [String: GTFSRouteStyle]
+    let routeShapeIDByRouteKey: [RouteKey: String]
+    let shapeIDByTripID: [String: String]
+    let shapePointsByShapeID: [String: [CLLocationCoordinate2D]]
     let feedInfo: GTFSFeedInfo?
+
+    init(
+        routeStops: [RouteKey: [BusStop]],
+        routeStopSchedules: [RouteKey: [RouteStopSchedule]],
+        routeDirectionLabels: [RouteKey: String],
+        routeNamesByRouteID: [String: GTFSRouteName],
+        routeStylesByRouteID: [String: GTFSRouteStyle],
+        routeShapeIDByRouteKey: [RouteKey: String] = [:],
+        shapeIDByTripID: [String: String] = [:],
+        shapePointsByShapeID: [String: [CLLocationCoordinate2D]] = [:],
+        feedInfo: GTFSFeedInfo?
+    ) {
+        self.routeStops = routeStops
+        self.routeStopSchedules = routeStopSchedules
+        self.routeDirectionLabels = routeDirectionLabels
+        self.routeNamesByRouteID = routeNamesByRouteID
+        self.routeStylesByRouteID = routeStylesByRouteID
+        self.routeShapeIDByRouteKey = routeShapeIDByRouteKey
+        self.shapeIDByTripID = shapeIDByTripID
+        self.shapePointsByShapeID = shapePointsByShapeID
+        self.feedInfo = feedInfo
+    }
 
     var availableRoutes: [String] {
         let routeIDs = Set(routeStops.keys.map(\.route))
@@ -156,6 +181,8 @@ struct NearbyETACard: Identifiable, Hashable {
     let directionText: String
     let stopID: String
     let stopName: String
+    let tripID: String?
+    let liveVehicleID: String?
     let distanceMeters: Int?
     let etaMinutes: Int?
     let arrivalTime: Date?

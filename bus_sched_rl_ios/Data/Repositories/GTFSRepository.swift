@@ -12,6 +12,8 @@ private struct TripsParseResult {
     let representativeTripByRoute: [RouteKey: String]
     let routeByTripID: [String: RouteKey]
     let directionLabelByRoute: [RouteKey: String]
+    let shapeIDByTripID: [String: String]
+    let routeShapeIDByRouteKey: [RouteKey: String]
 }
 
 private enum GTFSParsers {
@@ -53,6 +55,8 @@ private enum GTFSParsers {
         var representativeTripByRoute: [RouteKey: String] = [:]
         var routeByTripID: [String: RouteKey] = [:]
         var directionLabelByRoute: [RouteKey: String] = [:]
+        var shapeIDByTripID: [String: String] = [:]
+        var routeShapeIDByRouteKey: [RouteKey: String] = [:]
 
         var isHeader = true
         var header: [String: Int] = [:]
@@ -84,6 +88,17 @@ private enum GTFSParsers {
                 representativeTripByRoute[routeKey] = tripID
             }
 
+            if let shapeIndex = header["shape_id"],
+               shapeIndex < cols.count {
+                let shapeID = normalize(cols[shapeIndex])
+                if !shapeID.isEmpty {
+                    shapeIDByTripID[tripID] = shapeID
+                    if routeShapeIDByRouteKey[routeKey] == nil {
+                        routeShapeIDByRouteKey[routeKey] = shapeID
+                    }
+                }
+            }
+
             if directionLabelByRoute[routeKey] == nil {
                 let headsign: String
                 if let headsignIndex = header["trip_headsign"], headsignIndex < cols.count {
@@ -101,8 +116,55 @@ private enum GTFSParsers {
         return TripsParseResult(
             representativeTripByRoute: representativeTripByRoute,
             routeByTripID: routeByTripID,
-            directionLabelByRoute: directionLabelByRoute
+            directionLabelByRoute: directionLabelByRoute,
+            shapeIDByTripID: shapeIDByTripID,
+            routeShapeIDByRouteKey: routeShapeIDByRouteKey
         )
+    }
+
+    static func parseShapes(_ text: String) -> [String: [CLLocationCoordinate2D]] {
+        var pointsByShapeID: [String: [(sequence: Int, coordinate: CLLocationCoordinate2D)]] = [:]
+        var isHeader = true
+        var header: [String: Int] = [:]
+
+        text.enumerateLines { line, _ in
+            if isHeader {
+                isHeader = false
+                header = headerIndexMap(line)
+                return
+            }
+
+            guard !line.isEmpty, let cols = try? CSVParser.parseLine(line) else { return }
+            guard let shapeIDIndex = header["shape_id"],
+                  let latitudeIndex = header["shape_pt_lat"],
+                  let longitudeIndex = header["shape_pt_lon"],
+                  let sequenceIndex = header["shape_pt_sequence"],
+                  shapeIDIndex < cols.count,
+                  latitudeIndex < cols.count,
+                  longitudeIndex < cols.count,
+                  sequenceIndex < cols.count,
+                  let latitude = Double(cols[latitudeIndex]),
+                  let longitude = Double(cols[longitudeIndex]),
+                  let sequence = Int(cols[sequenceIndex]) else {
+                return
+            }
+
+            let shapeID = normalize(cols[shapeIDIndex])
+            guard !shapeID.isEmpty else { return }
+
+            pointsByShapeID[shapeID, default: []].append(
+                (
+                    sequence: sequence,
+                    coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+                )
+            )
+        }
+
+        return pointsByShapeID.mapValues { points in
+            points
+                .sorted { $0.sequence < $1.sequence }
+                .map(\.coordinate)
+        }
     }
 
     static func parseStops(_ text: String) -> [String: BusStop] {
@@ -391,11 +453,30 @@ private struct CachedRouteStyleEntry: Codable {
     let routeTextColorHex: String?
 }
 
+private struct CachedRouteShapeEntry: Codable {
+    let route: String
+    let direction: String
+    let shapeID: String
+}
+
+private struct CachedTripShapeEntry: Codable {
+    let tripID: String
+    let shapeID: String
+}
+
+private struct CachedShapePointsEntry: Codable {
+    let shapeID: String
+    let points: [CachedCoordinate]
+}
+
 private struct GTFSStaticCachePayload: Codable {
     let routeStopSchedules: [CachedRouteStopSchedulesEntry]
     let routeDirectionLabels: [CachedRouteDirectionLabelEntry]
     let routeNames: [CachedRouteNameEntry]
     let routeStyles: [CachedRouteStyleEntry]
+    let routeShapes: [CachedRouteShapeEntry]
+    let tripShapes: [CachedTripShapeEntry]
+    let shapePoints: [CachedShapePointsEntry]
     let feedInfo: GTFSFeedInfo?
 
     init(staticData: GTFSStaticData) {
@@ -422,6 +503,15 @@ private struct GTFSStaticCachePayload: Codable {
                 routeColorHex: style.routeColorHex,
                 routeTextColorHex: style.routeTextColorHex
             )
+        }
+        routeShapes = staticData.routeShapeIDByRouteKey.map { key, shapeID in
+            CachedRouteShapeEntry(route: key.route, direction: key.direction, shapeID: shapeID)
+        }
+        tripShapes = staticData.shapeIDByTripID.map { tripID, shapeID in
+            CachedTripShapeEntry(tripID: tripID, shapeID: shapeID)
+        }
+        shapePoints = staticData.shapePointsByShapeID.map { shapeID, points in
+            CachedShapePointsEntry(shapeID: shapeID, points: points.map(CachedCoordinate.init))
         }
         feedInfo = staticData.feedInfo
     }
@@ -457,12 +547,25 @@ private struct GTFSStaticCachePayload: Codable {
             )
         }
 
+        var nextRouteShapeIDByRouteKey: [RouteKey: String] = [:]
+        for entry in self.routeShapes {
+            nextRouteShapeIDByRouteKey[RouteKey(route: entry.route, direction: entry.direction)] = entry.shapeID
+        }
+
+        let nextShapeIDByTripID = Dictionary(uniqueKeysWithValues: tripShapes.map { ($0.tripID, $0.shapeID) })
+        let nextShapePointsByShapeID = Dictionary(
+            uniqueKeysWithValues: shapePoints.map { ($0.shapeID, $0.points.map(\.coordinate)) }
+        )
+
         return GTFSStaticData(
             routeStops: nextRouteStops,
             routeStopSchedules: nextRouteStopSchedules,
             routeDirectionLabels: nextRouteDirectionLabels,
             routeNamesByRouteID: nextRouteNamesByRouteID,
             routeStylesByRouteID: nextRouteStylesByRouteID,
+            routeShapeIDByRouteKey: nextRouteShapeIDByRouteKey,
+            shapeIDByTripID: nextShapeIDByTripID,
+            shapePointsByShapeID: nextShapePointsByShapeID,
             feedInfo: feedInfo
         )
     }
@@ -488,17 +591,17 @@ actor LiveGTFSRepository: GTFSRepository {
     private let persistedCacheDirectory: URL
     private let session: URLSession
     private let userDefaults: UserDefaults
-    private let cacheSchemaVersion = 5
+    private let cacheSchemaVersion = 6
     private let staleRevalidationInterval: TimeInterval = 24 * 60 * 60
     private var cachedData: GTFSStaticData?
     private var refreshTask: Task<Void, Never>?
 
     private var payloadURL: URL {
-        persistedCacheDirectory.appendingPathComponent("static_data_v5.plist")
+        persistedCacheDirectory.appendingPathComponent("static_data_v6.plist")
     }
 
     private var manifestURL: URL {
-        persistedCacheDirectory.appendingPathComponent("manifest_v5.plist")
+        persistedCacheDirectory.appendingPathComponent("manifest_v6.plist")
     }
 
     init(
@@ -645,6 +748,7 @@ actor LiveGTFSRepository: GTFSRepository {
         let routesURL = extractionDirectory.appendingPathComponent("routes.txt")
         let stopsURL = extractionDirectory.appendingPathComponent("stops.txt")
         let stopTimesURL = extractionDirectory.appendingPathComponent("stop_times.txt")
+        let shapesURL = extractionDirectory.appendingPathComponent("shapes.txt")
         let feedInfoURL = extractionDirectory.appendingPathComponent("feed_info.txt")
 
         guard FileManager.default.fileExists(atPath: tripsURL.path),
@@ -669,6 +773,7 @@ actor LiveGTFSRepository: GTFSRepository {
             routesURL: routesURL,
             stopsURL: stopsURL,
             stopTimesURL: stopTimesURL,
+            shapesURL: shapesURL,
             feedInfoText: feedInfoText
         )
     }
@@ -708,6 +813,9 @@ actor LiveGTFSRepository: GTFSRepository {
                     routeDirectionLabels: data.routeDirectionLabels,
                     routeNamesByRouteID: data.routeNamesByRouteID,
                     routeStylesByRouteID: data.routeStylesByRouteID,
+                    routeShapeIDByRouteKey: data.routeShapeIDByRouteKey,
+                    shapeIDByTripID: data.shapeIDByTripID,
+                    shapePointsByShapeID: data.shapePointsByShapeID,
                     feedInfo: feedInfo
                 )
             }
@@ -845,6 +953,7 @@ actor LiveGTFSRepository: GTFSRepository {
         routesURL: URL,
         stopsURL: URL,
         stopTimesURL: URL,
+        shapesURL: URL,
         feedInfoText: String?
     ) throws -> GTFSStaticData {
         let tripsText = try String(contentsOf: tripsURL, encoding: .utf8)
@@ -856,10 +965,17 @@ actor LiveGTFSRepository: GTFSRepository {
         }
         let stopsText = try String(contentsOf: stopsURL, encoding: .utf8)
         let stopTimesText = try String(contentsOf: stopTimesURL, encoding: .utf8)
+        let shapesText: String?
+        if FileManager.default.fileExists(atPath: shapesURL.path) {
+            shapesText = try String(contentsOf: shapesURL, encoding: .utf8)
+        } else {
+            shapesText = nil
+        }
 
         let trips = GTFSParsers.parseTrips(tripsText)
         let routeCatalog = routesText.map(GTFSParsers.parseRouteCatalog) ?? .empty
         let stopsByID = GTFSParsers.parseStops(stopsText)
+        let shapePointsByShapeID = shapesText.map(GTFSParsers.parseShapes) ?? [:]
         let routeStopSchedules = GTFSParsers.parseRouteStopSchedules(
             stopTimesText: stopTimesText,
             representativeTripByRoute: trips.representativeTripByRoute,
@@ -877,6 +993,9 @@ actor LiveGTFSRepository: GTFSRepository {
             routeDirectionLabels: trips.directionLabelByRoute,
             routeNamesByRouteID: routeCatalog.namesByRouteID,
             routeStylesByRouteID: routeCatalog.stylesByRouteID,
+            routeShapeIDByRouteKey: trips.routeShapeIDByRouteKey,
+            shapeIDByTripID: trips.shapeIDByTripID,
+            shapePointsByShapeID: shapePointsByShapeID,
             feedInfo: feedInfoText.flatMap(GTFSParsers.parseFeedInfo)
         )
     }

@@ -112,6 +112,72 @@ final class NearbyETAComposerTests: XCTestCase {
         XCTAssertTrue(cards.allSatisfy { $0.routeID == "55" && $0.directionID == "1" })
     }
 
+    func testComposeCardsCarriesLiveVehicleIdentityForLiveArrivals() {
+        let now = Date()
+        let routeKey = RouteKey(route: "55", direction: "0")
+        let stop = BusStop(
+            id: "stop-1",
+            name: "Main Stop",
+            coord: CLLocationCoordinate2D(latitude: 45.50, longitude: -73.60)
+        )
+        let staticData = makeStaticData(
+            routeStopSchedules: [
+                routeKey: [
+                    RouteStopSchedule(
+                        stop: stop,
+                        sequence: 1,
+                        scheduledArrival: "23:59:00",
+                        scheduledDeparture: nil
+                    )
+                ]
+            ],
+            routeDirectionLabels: [routeKey: "Nord"]
+        )
+        let snapshot = RealtimeSnapshot(
+            vehicles: [
+                VehiclePosition(
+                    id: "vehicle-1",
+                    tripID: "trip-1",
+                    route: "55",
+                    direction: 0,
+                    heading: 90,
+                    coord: CLLocationCoordinate2D(latitude: 45.5004, longitude: -73.6004),
+                    lastUpdatedAt: now
+                )
+            ],
+            tripUpdates: [
+                TripUpdatePayload(
+                    tripID: "trip-1",
+                    routeID: "55",
+                    directionID: 0,
+                    vehicleID: "vehicle-1",
+                    timestamp: now,
+                    stopTimeUpdates: [
+                        TripStopTimeUpdate(
+                            stopID: "stop-1",
+                            stopSequence: 1,
+                            arrivalTime: now.addingTimeInterval(2 * 60),
+                            departureTime: nil
+                        )
+                    ]
+                )
+            ]
+        )
+
+        let cards = NearbyETAComposer().composeCards(
+            staticData: staticData,
+            index: TransitDataIndex(staticData: staticData),
+            snapshot: snapshot,
+            userLocation: CLLocationCoordinate2D(latitude: 45.5001, longitude: -73.6001),
+            scope: .nearby,
+            referenceDate: now
+        )
+
+        XCTAssertEqual(cards.first?.source, .live)
+        XCTAssertEqual(cards.first?.tripID, "trip-1")
+        XCTAssertEqual(cards.first?.liveVehicleID, "vehicle-1")
+    }
+
     private func makeStaticData(
         routeStopSchedules: [RouteKey: [RouteStopSchedule]],
         routeDirectionLabels: [RouteKey: String] = [:]

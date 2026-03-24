@@ -245,7 +245,11 @@ struct ContentView: View {
                 } else {
                     ForEach(viewModel.cards) { card in
                         NavigationLink {
-                            ArrivalDetailView(viewModel: viewModel, initialCard: card)
+                            ArrivalDetailView(
+                                viewModel: viewModel,
+                                locationService: locationService,
+                                initialCard: card
+                            )
                         } label: {
                             ETACardView(card: card, showsDisclosureIndicator: true)
                         }

@@ -29,6 +29,7 @@ final class NearbyETAViewModel: ObservableObject {
     private let realtimeRepository: RealtimeRepository
     private let composer = NearbyETAComposer()
     private let livePollInterval: Duration
+    private let detailRefreshInterval: Duration = .seconds(10)
 
     private var staticData: GTFSStaticData?
     private var dataIndex: TransitDataIndex?
@@ -39,9 +40,11 @@ final class NearbyETAViewModel: ObservableObject {
     private var hasLoaded = false
     private var suppressQuerySideEffects = false
     private var livePollingTask: Task<Void, Never>?
+    private var detailRefreshTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
     private var cardsTask: Task<Void, Never>?
     private var cardsGeneration = 0
+    private var detailRefreshObservers = 0
 
     init(
         gtfsRepository: GTFSRepository = LiveGTFSRepository(),
@@ -55,6 +58,7 @@ final class NearbyETAViewModel: ObservableObject {
 
     deinit {
         livePollingTask?.cancel()
+        detailRefreshTask?.cancel()
         searchTask?.cancel()
         cardsTask?.cancel()
     }
@@ -139,6 +143,85 @@ final class NearbyETAViewModel: ObservableObject {
         refreshNow(trigger: .manual)
     }
 
+    func beginDetailRefresh() {
+        detailRefreshObservers += 1
+        guard detailRefreshTask == nil else { return }
+
+        detailRefreshTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: self.detailRefreshInterval)
+                } catch {
+                    break
+                }
+                self.refreshNow(trigger: .detail)
+            }
+
+            await MainActor.run {
+                self.detailRefreshTask = nil
+            }
+        }
+    }
+
+    func endDetailRefresh() {
+        detailRefreshObservers = max(0, detailRefreshObservers - 1)
+        guard detailRefreshObservers == 0 else { return }
+        detailRefreshTask?.cancel()
+        detailRefreshTask = nil
+    }
+
+    func cardDetail(for initialCard: NearbyETACard) -> NearbyETACard {
+        cards.first(where: { $0.id == initialCard.id }) ?? initialCard
+    }
+
+    func liveVehicle(for card: NearbyETACard) -> VehiclePosition? {
+        guard card.source == .live else { return nil }
+
+        if let liveVehicleID = card.liveVehicleID,
+           let vehicle = snapshot.vehicles.first(where: { $0.id == liveVehicleID }) {
+            return vehicle
+        }
+
+        if let tripID = card.tripID,
+           let vehicle = snapshot.vehicles.first(where: { $0.tripID == tripID }) {
+            return vehicle
+        }
+
+        let routeMatches = snapshot.vehicles.filter {
+            $0.route == card.routeID && String($0.direction ?? 0) == card.directionID
+        }
+        if routeMatches.count == 1 {
+            return routeMatches[0]
+        }
+
+        return nil
+    }
+
+    func arrivalLiveMapModel(
+        for card: NearbyETACard,
+        userLocation: CLLocationCoordinate2D?
+    ) -> ArrivalLiveMapModel? {
+        guard let vehicle = liveVehicle(for: card),
+              let stop = dataIndex?.allStopsByID[card.stopID] else {
+            return nil
+        }
+
+        let pathCoordinates = routePathCoordinates(
+            for: card,
+            vehicleCoordinate: vehicle.coord,
+            stopCoordinate: stop.coord
+        )
+
+        return ArrivalLiveMapModel(
+            vehicle: vehicle,
+            stopName: stop.name,
+            stopCoordinate: stop.coord,
+            userLocation: userLocation,
+            pathCoordinates: pathCoordinates
+        )
+    }
+
     private func handleQueryChanged() {
         guard !suppressQuerySideEffects else { return }
         selectedResult = nil
@@ -165,6 +248,46 @@ final class NearbyETAViewModel: ObservableObject {
             return routeMatch.route.routeShortName
         case .stop(let stopMatch):
             return stopMatch.stop.stopName
+        }
+    }
+
+    private func routePathCoordinates(
+        for card: NearbyETACard,
+        vehicleCoordinate: CLLocationCoordinate2D,
+        stopCoordinate: CLLocationCoordinate2D
+    ) -> [CLLocationCoordinate2D] {
+        guard let staticData else {
+            return [vehicleCoordinate, stopCoordinate]
+        }
+
+        let routeKey = RouteKey(route: card.routeID, direction: card.directionID)
+        let shapeID = card.tripID.flatMap { staticData.shapeIDByTripID[$0] } ??
+            staticData.routeShapeIDByRouteKey[routeKey]
+
+        guard let shapeID,
+              let shapePoints = staticData.shapePointsByShapeID[shapeID],
+              shapePoints.count >= 2 else {
+            return [vehicleCoordinate, stopCoordinate]
+        }
+
+        guard let vehicleIndex = nearestShapePointIndex(to: vehicleCoordinate, in: shapePoints),
+              let stopIndex = nearestShapePointIndex(to: stopCoordinate, in: shapePoints) else {
+            return [vehicleCoordinate, stopCoordinate]
+        }
+
+        if vehicleIndex <= stopIndex {
+            return Array(shapePoints[vehicleIndex...stopIndex])
+        }
+        return Array(shapePoints[stopIndex...vehicleIndex].reversed())
+    }
+
+    private func nearestShapePointIndex(
+        to coordinate: CLLocationCoordinate2D,
+        in points: [CLLocationCoordinate2D]
+    ) -> Int? {
+        points.indices.min {
+            TransitMath.planarDistanceMeters(from: points[$0], to: coordinate) <
+                TransitMath.planarDistanceMeters(from: points[$1], to: coordinate)
         }
     }
 
@@ -270,6 +393,7 @@ final class NearbyETAViewModel: ObservableObject {
         case initial
         case polling
         case manual
+        case detail
     }
 
     private func refreshNow(trigger: RefreshTrigger) {

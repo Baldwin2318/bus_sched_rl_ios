@@ -1,6 +1,12 @@
 import Foundation
 import CoreLocation
 
+struct LiveArrivalMatch: Equatable {
+    let tripID: String
+    let vehicleID: String?
+    let arrivalTime: Date
+}
+
 struct TransitDataIndex {
     let allStopsByID: [String: BusStop]
     let routeKeysByStopID: [String: [RouteKey]]
@@ -126,7 +132,7 @@ struct NearbyETAComposer {
             let arrivalTime: Date?
             if let liveArrival {
                 source = .live
-                arrivalTime = liveArrival
+                arrivalTime = liveArrival.arrivalTime
             } else if let estimatedArrival {
                 source = .estimated
                 arrivalTime = estimatedArrival
@@ -159,6 +165,8 @@ struct NearbyETAComposer {
                     directionText: TransitText.directionText(for: routeKey, labels: staticData.routeDirectionLabels),
                     stopID: candidate.stopID,
                     stopName: stop.name,
+                    tripID: liveArrival?.tripID,
+                    liveVehicleID: liveArrival?.vehicleID,
                     distanceMeters: distanceMeters,
                     etaMinutes: etaMinutes,
                     arrivalTime: arrivalTime,
@@ -290,8 +298,8 @@ struct NearbyETAComposer {
         index: TransitDataIndex,
         snapshot: RealtimeSnapshot,
         referenceDate: Date
-    ) -> [RouteKey: [String: Date]] {
-        var lookup: [RouteKey: [String: Date]] = [:]
+    ) -> [RouteKey: [String: LiveArrivalMatch]] {
+        var lookup: [RouteKey: [String: LiveArrivalMatch]] = [:]
 
         for update in snapshot.tripUpdates {
             guard let routeID = update.routeID else { continue }
@@ -322,9 +330,14 @@ struct NearbyETAComposer {
                     continue
                 }
 
+                let candidate = LiveArrivalMatch(
+                    tripID: update.tripID,
+                    vehicleID: update.vehicleID,
+                    arrivalTime: arrival
+                )
                 let existing = lookup[routeKey]?[stopID]
-                if existing == nil || arrival < existing! {
-                    lookup[routeKey, default: [:]][stopID] = arrival
+                if existing == nil || candidate.arrivalTime < existing!.arrivalTime {
+                    lookup[routeKey, default: [:]][stopID] = candidate
                 }
             }
         }
