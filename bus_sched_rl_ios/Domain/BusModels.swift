@@ -268,6 +268,7 @@ struct TripUpdatePayload: Hashable {
     let directionID: Int?
     let vehicleID: String?
     let timestamp: Date?
+    let shapeIDOverride: String?
     let delaySeconds: Int?
     let stopTimeUpdates: [TripStopTimeUpdate]
 
@@ -277,6 +278,7 @@ struct TripUpdatePayload: Hashable {
         directionID: Int?,
         vehicleID: String?,
         timestamp: Date?,
+        shapeIDOverride: String? = nil,
         delaySeconds: Int? = nil,
         stopTimeUpdates: [TripStopTimeUpdate]
     ) {
@@ -285,6 +287,7 @@ struct TripUpdatePayload: Hashable {
         self.directionID = directionID
         self.vehicleID = vehicleID
         self.timestamp = timestamp
+        self.shapeIDOverride = shapeIDOverride
         self.delaySeconds = delaySeconds
         self.stopTimeUpdates = stopTimeUpdates
     }
@@ -294,15 +297,18 @@ struct RealtimeSnapshot {
     let vehicles: [VehiclePosition]
     let tripUpdates: [TripUpdatePayload]
     let alerts: [ServiceAlert]
+    let shapePointsByShapeID: [String: [CLLocationCoordinate2D]]
 
     init(
         vehicles: [VehiclePosition],
         tripUpdates: [TripUpdatePayload],
-        alerts: [ServiceAlert] = []
+        alerts: [ServiceAlert] = [],
+        shapePointsByShapeID: [String: [CLLocationCoordinate2D]] = [:]
     ) {
         self.vehicles = vehicles
         self.tripUpdates = tripUpdates
         self.alerts = alerts
+        self.shapePointsByShapeID = shapePointsByShapeID
     }
 }
 

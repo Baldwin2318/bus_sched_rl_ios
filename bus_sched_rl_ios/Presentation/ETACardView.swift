@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ETACardView: View {
     let card: NearbyETACard
+    var quality: ETACardQuality? = nil
     var showsDisclosureIndicator: Bool = false
 
     var body: some View {
@@ -30,6 +31,20 @@ struct ETACardView: View {
                     .font(.subheadline)
                     .foregroundStyle(NearbyETATheme.secondaryText)
                     .lineLimit(1)
+
+                if let quality, hasQualityContent(quality) {
+                    HStack(spacing: 6) {
+                        if let statusText = quality.statusText {
+                            qualityTag(statusText, tint: .blue)
+                        }
+                        if let freshnessText = quality.freshnessText {
+                            qualityTag(freshnessText, tint: freshnessTint(for: quality.freshness))
+                        }
+                        if let delayText = quality.delayText {
+                            qualityTag(delayText, tint: .orange)
+                        }
+                    }
+                }
 
                 HStack(spacing: 8) {
                     if let distanceText {
@@ -98,5 +113,34 @@ struct ETACardView: View {
             return "\(distanceMeters)m"
         }
         return String(format: "%.1fkm", Double(distanceMeters) / 1000)
+    }
+
+    private func hasQualityContent(_ quality: ETACardQuality) -> Bool {
+        quality.statusText != nil || quality.freshnessText != nil || quality.delayText != nil
+    }
+
+    private func freshnessTint(for freshness: VehicleFreshness?) -> Color {
+        switch freshness {
+        case .fresh:
+            return .green
+        case .aging:
+            return .orange
+        case .stale:
+            return .red
+        case .none:
+            return .gray
+        }
+    }
+
+    private func qualityTag(_ text: String, tint: Color) -> some View {
+        Text(text)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(tint.opacity(0.12))
+            )
     }
 }

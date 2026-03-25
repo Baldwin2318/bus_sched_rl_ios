@@ -37,13 +37,15 @@ actor STMRealtimeRepository: RealtimeRepository {
         let tripUpdateResult = try? await tripUpdatesTask
         let tripUpdates = tripUpdateResult?.updates ?? []
         let embeddedAlerts = tripUpdateResult?.alerts ?? []
+        let tripUpdateShapes = tripUpdateResult?.shapePointsByShapeID ?? [:]
         let serviceAlerts = (try? await alertsTask) ?? []
         let alerts = dedupeAlerts(embeddedAlerts + serviceAlerts)
 
         return RealtimeSnapshot(
             vehicles: vehicles,
             tripUpdates: tripUpdates,
-            alerts: alerts
+            alerts: alerts,
+            shapePointsByShapeID: tripUpdateShapes
         )
     }
 
@@ -88,7 +90,11 @@ actor STMRealtimeRepository: RealtimeRepository {
         }
     }
 
-    private func fetchTripUpdatesFeed(apiKey: String) async throws -> (updates: [TripUpdatePayload], alerts: [ServiceAlert]) {
+    private func fetchTripUpdatesFeed(apiKey: String) async throws -> (
+        updates: [TripUpdatePayload],
+        alerts: [ServiceAlert],
+        shapePointsByShapeID: [String: [CLLocationCoordinate2D]]
+    ) {
         let feed = try await fetchFeed(url: tripUpdatesFeedURL, apiKey: apiKey)
 
         let updates = feed.entity.compactMap { entity -> TripUpdatePayload? in
@@ -125,6 +131,9 @@ actor STMRealtimeRepository: RealtimeRepository {
                 directionID: tripUpdate.trip.hasDirectionID ? Int(tripUpdate.trip.directionID) : nil,
                 vehicleID: tripUpdate.hasVehicle ? normalized(tripUpdate.vehicle.id) : nil,
                 timestamp: tripUpdate.hasTimestamp ? Date(timeIntervalSince1970: TimeInterval(tripUpdate.timestamp)) : nil,
+                shapeIDOverride: tripUpdate.hasTripProperties && tripUpdate.tripProperties.hasShapeID
+                    ? normalized(tripUpdate.tripProperties.shapeID)
+                    : nil,
                 delaySeconds: tripUpdate.hasDelay ? Int(tripUpdate.delay) : nil,
                 stopTimeUpdates: stopUpdates
             )
@@ -132,7 +141,8 @@ actor STMRealtimeRepository: RealtimeRepository {
 
         return (
             updates: updates,
-            alerts: GTFSRealtimeAlertParser.parseAlerts(from: feed)
+            alerts: GTFSRealtimeAlertParser.parseAlerts(from: feed),
+            shapePointsByShapeID: GTFSRealtimeShapeParser.parseShapes(from: feed)
         )
     }
 
@@ -224,6 +234,21 @@ actor STMRealtimeRepository: RealtimeRepository {
             return .noDataAvailable
         case .notBoardable:
             return .notBoardable
+        }
+    }
+}
+
+struct GTFSRealtimeShapeParser {
+    static func parseShapes(from feed: TransitRealtime_FeedMessage) -> [String: [CLLocationCoordinate2D]] {
+        feed.entity.reduce(into: [:]) { partialResult, entity in
+            guard entity.hasShape else { return }
+            let shape = entity.shape
+            guard shape.hasShapeID, shape.hasEncodedPolyline else { return }
+            let shapeID = shape.shapeID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !shapeID.isEmpty else { return }
+            let coordinates = TransitMath.decodeEncodedPolyline(shape.encodedPolyline)
+            guard coordinates.count >= 2 else { return }
+            partialResult[shapeID] = coordinates
         }
     }
 }

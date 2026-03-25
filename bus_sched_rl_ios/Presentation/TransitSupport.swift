@@ -112,6 +112,53 @@ enum TransitMath {
         }
         return delta
     }
+
+    static func decodeEncodedPolyline(_ encoded: String) -> [CLLocationCoordinate2D] {
+        guard !encoded.isEmpty else { return [] }
+
+        var coordinates: [CLLocationCoordinate2D] = []
+        coordinates.reserveCapacity(max(2, encoded.count / 8))
+
+        let bytes = Array(encoded.utf8)
+        var index = 0
+        var latitude = 0
+        var longitude = 0
+
+        func decodeComponent() -> Int? {
+            var result = 0
+            var shift = 0
+
+            while index < bytes.count {
+                let byte = Int(bytes[index]) - 63
+                index += 1
+                result |= (byte & 0x1f) << shift
+                shift += 5
+                if byte < 0x20 {
+                    let value = (result & 1) != 0 ? ~(result >> 1) : (result >> 1)
+                    return value
+                }
+            }
+
+            return nil
+        }
+
+        while index < bytes.count {
+            guard let latDelta = decodeComponent(),
+                  let lonDelta = decodeComponent() else {
+                break
+            }
+            latitude += latDelta
+            longitude += lonDelta
+            coordinates.append(
+                CLLocationCoordinate2D(
+                    latitude: CLLocationDegrees(latitude) / 100_000.0,
+                    longitude: CLLocationDegrees(longitude) / 100_000.0
+                )
+            )
+        }
+
+        return coordinates
+    }
 }
 
 enum TransitText {

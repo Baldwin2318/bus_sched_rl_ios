@@ -131,7 +131,7 @@ struct ArrivalDetailView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                ETACardView(card: currentCard)
+                ETACardView(card: currentCard, quality: viewModel.cardQuality(for: currentCard))
 
                 if !alerts.isEmpty {
                     VStack(alignment: .leading, spacing: 12) {

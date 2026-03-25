@@ -293,6 +293,145 @@ final class NearbyETAViewModelTests: XCTestCase {
         XCTAssertTrue(renderedVehicle.isSnappedToRoute)
     }
 
+    func testCardQualitySurfacesStatusFreshnessAndDelay() async throws {
+        let routeKey = RouteKey(route: "55", direction: "0")
+        let stop = BusStop(
+            id: "stop-1",
+            name: "Main Stop",
+            coord: CLLocationCoordinate2D(latitude: 45.50, longitude: -73.60)
+        )
+        let now = Date()
+        let staticData = GTFSStaticData(
+            routeStops: [routeKey: [stop]],
+            routeStopSchedules: [routeKey: [
+                RouteStopSchedule(stop: stop, sequence: 1, scheduledArrival: "23:59:00", scheduledDeparture: nil)
+            ]],
+            routeDirectionLabels: [routeKey: "Nord"],
+            routeNamesByRouteID: ["55": GTFSRouteName(shortName: "55", longName: "Mock Route")],
+            routeStylesByRouteID: [:],
+            feedInfo: nil
+        )
+        let snapshot = RealtimeSnapshot(
+            vehicles: [
+                VehiclePosition(
+                    id: "vehicle-1",
+                    tripID: "trip-1",
+                    route: "55",
+                    direction: 0,
+                    currentStatus: .incomingAt,
+                    heading: 90,
+                    coord: CLLocationCoordinate2D(latitude: 45.5002, longitude: -73.6004),
+                    lastUpdatedAt: now
+                )
+            ],
+            tripUpdates: [
+                TripUpdatePayload(
+                    tripID: "trip-1",
+                    routeID: "55",
+                    directionID: 0,
+                    vehicleID: "vehicle-1",
+                    timestamp: now,
+                    delaySeconds: 300,
+                    stopTimeUpdates: [
+                        TripStopTimeUpdate(
+                            stopID: "stop-1",
+                            stopSequence: 1,
+                            arrivalTime: now.addingTimeInterval(3 * 60),
+                            departureTime: nil,
+                            delaySeconds: 300
+                        )
+                    ]
+                )
+            ]
+        )
+        let viewModel = NearbyETAViewModel(
+            gtfsRepository: StaticRepository(staticData: staticData),
+            realtimeRepository: SnapshotRepository(snapshot: snapshot),
+            livePollInterval: .seconds(120)
+        )
+
+        viewModel.updateUserLocation(CLLocationCoordinate2D(latitude: 45.5001, longitude: -73.6001))
+        viewModel.loadIfNeeded()
+
+        try await waitUntil { !viewModel.cards.isEmpty }
+        let liveCard = try XCTUnwrap(viewModel.cards.first)
+        let quality = try XCTUnwrap(viewModel.cardQuality(for: liveCard, referenceDate: now))
+
+        XCTAssertEqual(quality.statusText, "Approaching stop")
+        XCTAssertEqual(quality.freshness, .fresh)
+        XCTAssertEqual(quality.delayText, "5 min late")
+    }
+
+    func testArrivalLiveMapModelHidesStaleVehicle() async throws {
+        let routeKey = RouteKey(route: "55", direction: "0")
+        let stop = BusStop(
+            id: "stop-1",
+            name: "Main Stop",
+            coord: CLLocationCoordinate2D(latitude: 45.50, longitude: -73.60)
+        )
+        let now = Date()
+        let staleTime = now.addingTimeInterval(-180)
+        let staticData = GTFSStaticData(
+            routeStops: [routeKey: [stop]],
+            routeStopSchedules: [routeKey: [
+                RouteStopSchedule(stop: stop, sequence: 1, scheduledArrival: "23:59:00", scheduledDeparture: nil)
+            ]],
+            routeDirectionLabels: [routeKey: "Nord"],
+            routeNamesByRouteID: ["55": GTFSRouteName(shortName: "55", longName: "Mock Route")],
+            routeStylesByRouteID: [:],
+            feedInfo: nil
+        )
+        let snapshot = RealtimeSnapshot(
+            vehicles: [
+                VehiclePosition(
+                    id: "vehicle-1",
+                    tripID: "trip-1",
+                    route: "55",
+                    direction: 0,
+                    heading: 90,
+                    coord: CLLocationCoordinate2D(latitude: 45.5002, longitude: -73.6004),
+                    lastUpdatedAt: staleTime
+                )
+            ],
+            tripUpdates: [
+                TripUpdatePayload(
+                    tripID: "trip-1",
+                    routeID: "55",
+                    directionID: 0,
+                    vehicleID: "vehicle-1",
+                    timestamp: now,
+                    stopTimeUpdates: [
+                        TripStopTimeUpdate(
+                            stopID: "stop-1",
+                            stopSequence: 1,
+                            arrivalTime: now.addingTimeInterval(3 * 60),
+                            departureTime: nil
+                        )
+                    ]
+                )
+            ]
+        )
+        let viewModel = NearbyETAViewModel(
+            gtfsRepository: StaticRepository(staticData: staticData),
+            realtimeRepository: SnapshotRepository(snapshot: snapshot),
+            livePollInterval: .seconds(120)
+        )
+
+        viewModel.updateUserLocation(CLLocationCoordinate2D(latitude: 45.5001, longitude: -73.6001))
+        viewModel.loadIfNeeded()
+
+        try await waitUntil { !viewModel.cards.isEmpty }
+        let liveCard = try XCTUnwrap(viewModel.cards.first)
+
+        XCTAssertNil(
+            viewModel.arrivalLiveMapModel(
+                for: liveCard,
+                userLocation: CLLocationCoordinate2D(latitude: 45.5001, longitude: -73.6001),
+                referenceDate: now
+            )
+        )
+    }
+
     func testArrivalLiveMapModelUsesRouteShapeSegmentWhenAvailable() async throws {
         let routeKey = RouteKey(route: "55", direction: "0")
         let stop = BusStop(

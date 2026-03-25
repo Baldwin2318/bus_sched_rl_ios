@@ -70,6 +70,7 @@ final class NearbyETAViewModel: ObservableObject {
     private var favoriteIDs: [FavoriteArrivalID]
     private var favoriteFallbackCardsByID: [String: NearbyETACard] = [:]
     private var vehicleRenderStatesByID: [String: VehicleRenderState] = [:]
+    private var vehicleRenderIndex = VehicleRenderIndex(statesByVehicleID: [:])
 
     init(
         gtfsRepository: GTFSRepository = LiveGTFSRepository(),
@@ -329,6 +330,25 @@ final class NearbyETAViewModel: ObservableObject {
         return nil
     }
 
+    func cardQuality(
+        for card: NearbyETACard,
+        referenceDate: Date = Date()
+    ) -> ETACardQuality? {
+        let render = liveVehicleRender(for: card, referenceDate: referenceDate)
+        let tripUpdate = tripUpdate(for: card)
+        let stopDelaySeconds = tripUpdate?.stopTimeUpdates.first(where: {
+            ($0.assignedStopID ?? $0.stopID) == card.stopID || $0.stopID == card.stopID
+        })?.delaySeconds
+        let effectiveDelay = stopDelaySeconds ?? tripUpdate?.delaySeconds
+
+        guard render != nil || effectiveDelay != nil else { return nil }
+        return ETACardQuality(
+            statusText: render?.vehicle.currentStatus?.title,
+            freshness: render?.freshness,
+            delayText: effectiveDelay.map(TransitText.delayText(seconds:))
+        )
+    }
+
     func assignedStop(for card: NearbyETACard) -> BusStop? {
         guard let tripUpdate = tripUpdate(for: card),
               let assignedStopID = tripUpdate.stopTimeUpdates.first(where: {
@@ -355,12 +375,15 @@ final class NearbyETAViewModel: ObservableObject {
         referenceDate: Date = Date()
     ) -> ArrivalLiveMapModel? {
         guard let renderedVehicle = liveVehicleRender(for: card, referenceDate: referenceDate),
+              renderedVehicle.freshness != .stale,
               let stop = dataIndex?.allStopsByID[card.stopID] else {
             return nil
         }
 
-        let pathCoordinates = routePathCoordinates(
-            for: card,
+        let pathResolution = RoutePathResolver.resolve(
+            card: card,
+            staticData: staticData,
+            snapshot: snapshot,
             vehicleCoordinate: renderedVehicle.coordinate,
             stopCoordinate: stop.coord
         )
@@ -370,7 +393,7 @@ final class NearbyETAViewModel: ObservableObject {
             stopName: stop.name,
             stopCoordinate: stop.coord,
             userLocation: userLocation,
-            pathCoordinates: pathCoordinates
+            pathCoordinates: pathResolution.coordinates
         )
     }
 
@@ -403,53 +426,12 @@ final class NearbyETAViewModel: ObservableObject {
         }
     }
 
-    private func routePathCoordinates(
-        for card: NearbyETACard,
-        vehicleCoordinate: CLLocationCoordinate2D,
-        stopCoordinate: CLLocationCoordinate2D
-    ) -> [CLLocationCoordinate2D] {
-        guard let staticData else {
-            return [vehicleCoordinate, stopCoordinate]
-        }
-
-        let routeKey = RouteKey(route: card.routeID, direction: card.directionID)
-        let shapeID = card.tripID.flatMap { staticData.shapeIDByTripID[$0] } ??
-            staticData.routeShapeIDByRouteKey[routeKey]
-
-        guard let shapeID,
-              let shapePoints = staticData.shapePointsByShapeID[shapeID],
-              shapePoints.count >= 2 else {
-            return [vehicleCoordinate, stopCoordinate]
-        }
-
-        guard let vehicleIndex = nearestShapePointIndex(to: vehicleCoordinate, in: shapePoints),
-              let stopIndex = nearestShapePointIndex(to: stopCoordinate, in: shapePoints) else {
-            return [vehicleCoordinate, stopCoordinate]
-        }
-
-        if vehicleIndex <= stopIndex {
-            return Array(shapePoints[vehicleIndex...stopIndex])
-        }
-        return Array(shapePoints[stopIndex...vehicleIndex].reversed())
-    }
-
     private func routeShapePoints(for card: NearbyETACard) -> [CLLocationCoordinate2D]? {
-        guard let staticData else { return nil }
-        let routeKey = RouteKey(route: card.routeID, direction: card.directionID)
-        let shapeID = card.tripID.flatMap { staticData.shapeIDByTripID[$0] } ??
-            staticData.routeShapeIDByRouteKey[routeKey]
-        guard let shapeID else { return nil }
-        return staticData.shapePointsByShapeID[shapeID]
-    }
-
-    private func nearestShapePointIndex(
-        to coordinate: CLLocationCoordinate2D,
-        in points: [CLLocationCoordinate2D]
-    ) -> Int? {
-        points.indices.min {
-            TransitMath.planarDistanceMeters(from: points[$0], to: coordinate) <
-                TransitMath.planarDistanceMeters(from: points[$1], to: coordinate)
-        }
+        RoutePathResolver.shapePoints(
+            card: card,
+            staticData: staticData,
+            snapshot: snapshot
+        )
     }
 
     private func scheduleSearch() {
@@ -683,6 +665,7 @@ final class NearbyETAViewModel: ObservableObject {
                         vehicles: snapshot.vehicles,
                         receivedAt: receivedAt
                     )
+                    self.vehicleRenderIndex = VehicleRenderIndex(statesByVehicleID: self.vehicleRenderStatesByID)
                     self.snapshot = snapshot
                     self.lastUpdatedAt = receivedAt
                     self.liveStatusMessage = nil
@@ -705,28 +688,7 @@ final class NearbyETAViewModel: ObservableObject {
     }
 
     private func liveVehicleRenderState(for card: NearbyETACard) -> VehicleRenderState? {
-        guard card.source == .live else { return nil }
-
-        if let liveVehicleID = card.liveVehicleID,
-           let renderState = vehicleRenderStatesByID[liveVehicleID] {
-            return renderState
-        }
-
-        if let tripID = card.tripID {
-            let tripMatches = vehicleRenderStatesByID.values.filter { $0.current.tripID == tripID }
-            if tripMatches.count == 1 {
-                return tripMatches[0]
-            }
-        }
-
-        let routeMatches = vehicleRenderStatesByID.values.filter {
-            $0.current.route == card.routeID && String($0.current.direction ?? 0) == card.directionID
-        }
-        if routeMatches.count == 1 {
-            return routeMatches[0]
-        }
-
-        return nil
+        vehicleRenderIndex.state(for: card)
     }
 
     private func updatedVehicleRenderStates(

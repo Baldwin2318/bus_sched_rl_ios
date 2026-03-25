@@ -346,7 +346,11 @@ struct ContentView: View {
         Button {
             navigationPath.append(card)
         } label: {
-            ETACardView(card: card, showsDisclosureIndicator: true)
+            ETACardView(
+                card: card,
+                quality: viewModel.cardQuality(for: card),
+                showsDisclosureIndicator: true
+            )
         }
         .buttonStyle(.plain)
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {

@@ -46,12 +46,13 @@ private struct ArrivalLiveMKMapView: UIViewRepresentable {
         Coordinator()
     }
 
-    final class Coordinator: NSObject, MKMapViewDelegate {
-        private let stopAnnotation = MKPointAnnotation()
-        private let busAnnotation = MKPointAnnotation()
-        private var lastOverlayHash: String?
-        private var lastVisibleRectHash: String?
-        private var usesRouteShapePath = false
+        final class Coordinator: NSObject, MKMapViewDelegate {
+            private let stopAnnotation = MKPointAnnotation()
+            private let busAnnotation = MKPointAnnotation()
+            private var lastOverlayHash: String?
+            private var usesRouteShapePath = false
+            private var hasAppliedInitialViewport = false
+            private var lastViewportRouteHash: String?
 
         func apply(model: ArrivalLiveMapModel, to mapView: MKMapView) {
             stopAnnotation.title = model.stopName
@@ -90,19 +91,17 @@ private struct ArrivalLiveMKMapView: UIViewRepresentable {
         }
 
         private func syncVisibleRect(model: ArrivalLiveMapModel, mapView: MKMapView) {
-            let visibleRectHash = [
-                model.vehicle.coordinate.latitude,
-                model.vehicle.coordinate.longitude,
+            let routeHash = [
                 model.stopCoordinate.latitude,
                 model.stopCoordinate.longitude,
-                model.userLocation?.latitude ?? 0,
-                model.userLocation?.longitude ?? 0,
                 Double(model.routeLine.pointCount)
             ]
                 .map { String(format: "%.6f", $0) }
                 .joined(separator: ":")
 
-            guard visibleRectHash != lastVisibleRectHash else { return }
+            guard shouldUpdateViewport(model: model, mapView: mapView, routeHash: routeHash) else {
+                return
+            }
 
             var rect = model.routeLine.boundingMapRect
             rect = rect.union(MKMapRect(origin: MKMapPoint(model.vehicle.coordinate), size: MKMapSize(width: 0, height: 0)))
@@ -121,7 +120,35 @@ private struct ArrivalLiveMKMapView: UIViewRepresentable {
                 )
             }
 
-            lastVisibleRectHash = visibleRectHash
+            hasAppliedInitialViewport = true
+            lastViewportRouteHash = routeHash
+        }
+
+        private func shouldUpdateViewport(
+            model: ArrivalLiveMapModel,
+            mapView: MKMapView,
+            routeHash: String
+        ) -> Bool {
+            if !hasAppliedInitialViewport || routeHash != lastViewportRouteHash {
+                return true
+            }
+
+            let currentRect = mapView.visibleMapRect
+            guard !currentRect.isNull, !currentRect.isEmpty else {
+                return true
+            }
+
+            let insetRect = currentRect.insetBy(
+                dx: currentRect.size.width * 0.18,
+                dy: currentRect.size.height * 0.18
+            )
+
+            let importantPoints = [
+                MKMapPoint(model.vehicle.coordinate),
+                MKMapPoint(model.stopCoordinate)
+            ] + ([model.userLocation].compactMap { $0 }.map(MKMapPoint.init))
+
+            return importantPoints.contains { !insetRect.contains($0) }
         }
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
