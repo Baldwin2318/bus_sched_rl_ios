@@ -55,6 +55,14 @@ struct ServiceAlertView: View {
                             .foregroundStyle(NearbyETATheme.secondaryText)
                             .lineLimit(compact ? 3 : nil)
                     }
+
+                    if let url = alert.url {
+                        Link(destination: url) {
+                            Label("Open notice", systemImage: "arrow.up.right")
+                                .font(.subheadline.weight(.semibold))
+                        }
+                        .foregroundStyle(iconTint)
+                    }
                 }
 
                 Spacer(minLength: 0)

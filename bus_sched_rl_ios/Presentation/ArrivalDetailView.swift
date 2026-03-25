@@ -93,6 +93,7 @@ struct ArrivalDetailView: View {
     @ObservedObject var locationService: LocationService
     let initialCard: NearbyETACard
     @State private var isDetailRefreshActive = false
+    @State private var isShowingWarningsSheet = false
 
     private var currentCard: NearbyETACard {
         viewModel.cardDetail(for: initialCard)
@@ -132,16 +133,6 @@ struct ArrivalDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 ETACardView(card: currentCard, quality: viewModel.cardQuality(for: currentCard))
-
-                if !alerts.isEmpty {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Warnings")
-                            .font(.title3.weight(.semibold))
-                        ForEach(alerts) { alert in
-                            ServiceAlertView(alert: alert, compact: false)
-                        }
-                    }
-                }
 
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                     if let liveMapModel = viewModel.arrivalLiveMapModel(
@@ -235,7 +226,23 @@ struct ArrivalDetailView: View {
         .background(NearbyETATheme.background.ignoresSafeArea())
         .navigationTitle("Arrival details")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if !alerts.isEmpty {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        isShowingWarningsSheet = true
+                    } label: {
+                        Image(systemName: "exclamationmark.bubble")
+                    }
+                    .accessibilityLabel("Warnings")
+                    .accessibilityIdentifier("arrival-detail-warnings-toolbar-button")
+                }
+            }
+        }
         .accessibilityIdentifier("arrival-detail-screen")
+        .sheet(isPresented: $isShowingWarningsSheet) {
+            WarningsSheetView(alerts: alerts)
+        }
         .onAppear {
             syncDetailRefreshState()
         }

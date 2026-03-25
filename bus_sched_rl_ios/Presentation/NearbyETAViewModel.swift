@@ -624,7 +624,9 @@ final class NearbyETAViewModel: ObservableObject {
 
     private func applyStaticData(_ staticData: GTFSStaticData) async {
         self.staticData = staticData
-        dataIndex = TransitDataIndex(staticData: staticData)
+        let dataIndex = TransitDataIndex(staticData: staticData)
+        self.dataIndex = dataIndex
+        snapshot = normalizeSTMAlerts(in: snapshot, staticData: staticData, index: dataIndex)
         searchIndex = await Task.detached(priority: .userInitiated) {
             SearchIndexBuilder.build(from: staticData)
         }.value
@@ -684,7 +686,11 @@ final class NearbyETAViewModel: ObservableObject {
                         receivedAt: receivedAt
                     )
                     self.vehicleRenderIndex = VehicleRenderIndex(statesByVehicleID: self.vehicleRenderStatesByID)
-                    self.snapshot = snapshot
+                    if let staticData = self.staticData, let dataIndex = self.dataIndex {
+                        self.snapshot = self.normalizeSTMAlerts(in: snapshot, staticData: staticData, index: dataIndex)
+                    } else {
+                        self.snapshot = snapshot
+                    }
                     self.lastUpdatedAt = receivedAt
                     self.liveStatusMessage = nil
                     self.refreshCards()
@@ -707,6 +713,19 @@ final class NearbyETAViewModel: ObservableObject {
 
     private func liveVehicleRenderState(for card: NearbyETACard) -> VehicleRenderState? {
         vehicleRenderIndex.state(for: card)
+    }
+
+    private func normalizeSTMAlerts(
+        in snapshot: RealtimeSnapshot,
+        staticData: GTFSStaticData,
+        index: TransitDataIndex
+    ) -> RealtimeSnapshot {
+        RealtimeSnapshot(
+            vehicles: snapshot.vehicles,
+            tripUpdates: snapshot.tripUpdates,
+            alerts: STMServiceAlertNormalizer.normalize(snapshot.alerts, staticData: staticData, index: index),
+            shapePointsByShapeID: snapshot.shapePointsByShapeID
+        )
     }
 
     private func updatedVehicleRenderStates(

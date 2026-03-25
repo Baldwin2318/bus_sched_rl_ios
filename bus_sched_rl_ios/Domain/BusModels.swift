@@ -38,11 +38,20 @@ struct GTFSCacheMetadata: Equatable {
 
 struct BusStop: Hashable {
     let id: String
+    let stopCode: String?
     let name: String
     let coord: CLLocationCoordinate2D
 
+    init(id: String, stopCode: String? = nil, name: String, coord: CLLocationCoordinate2D) {
+        self.id = id
+        self.stopCode = stopCode
+        self.name = name
+        self.coord = coord
+    }
+
     static func == (lhs: BusStop, rhs: BusStop) -> Bool {
         lhs.id == rhs.id &&
+            lhs.stopCode == rhs.stopCode &&
             lhs.name == rhs.name &&
             lhs.coord.latitude == rhs.coord.latitude &&
             lhs.coord.longitude == rhs.coord.longitude
@@ -50,6 +59,7 @@ struct BusStop: Hashable {
 
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
+        hasher.combine(stopCode)
         hasher.combine(name)
         hasher.combine(coord.latitude)
         hasher.combine(coord.longitude)

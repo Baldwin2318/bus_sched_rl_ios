@@ -195,9 +195,13 @@ private enum GTFSParsers {
 
             let stopID = normalize(cols[idIndex])
             guard !stopID.isEmpty else { return }
+            let stopCode = header["stop_code"].flatMap { index in
+                index < cols.count ? normalizedOptional(cols[index]) : nil
+            }
 
             stopsByID[stopID] = BusStop(
                 id: stopID,
+                stopCode: stopCode,
                 name: normalize(cols[nameIndex]),
                 coord: CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
             )
@@ -404,6 +408,7 @@ private struct CachedCoordinate: Codable {
 
 private struct CachedRouteStopSchedule: Codable {
     let id: String
+    let stopCode: String?
     let name: String
     let coordinate: CachedCoordinate
     let sequence: Int
@@ -412,6 +417,7 @@ private struct CachedRouteStopSchedule: Codable {
 
     init(_ schedule: RouteStopSchedule) {
         id = schedule.stop.id
+        stopCode = schedule.stop.stopCode
         name = schedule.stop.name
         coordinate = CachedCoordinate(schedule.stop.coord)
         sequence = schedule.sequence
@@ -421,7 +427,7 @@ private struct CachedRouteStopSchedule: Codable {
 
     var schedule: RouteStopSchedule {
         RouteStopSchedule(
-            stop: BusStop(id: id, name: name, coord: coordinate.coordinate),
+            stop: BusStop(id: id, stopCode: stopCode, name: name, coord: coordinate.coordinate),
             sequence: sequence,
             scheduledArrival: scheduledArrival,
             scheduledDeparture: scheduledDeparture

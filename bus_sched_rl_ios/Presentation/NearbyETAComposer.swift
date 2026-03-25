@@ -14,12 +14,14 @@ struct LiveArrivalMatch: Equatable {
 
 struct TransitDataIndex {
     let allStopsByID: [String: BusStop]
+    let stopIDsByCode: [String: [String]]
     let routeKeysByStopID: [String: [RouteKey]]
     let schedulesByRouteKeyAndStopID: [RouteKey: [String: RouteStopSchedule]]
     let routeKeysByRouteID: [String: [RouteKey]]
 
     init(staticData: GTFSStaticData) {
         var allStopsByID: [String: BusStop] = [:]
+        var stopIDsByCode: [String: Set<String>] = [:]
         var routeKeysByStopID: [String: Set<RouteKey>] = [:]
         var schedulesByRouteKeyAndStopID: [RouteKey: [String: RouteStopSchedule]] = [:]
         var routeKeysByRouteID: [String: Set<RouteKey>] = [:]
@@ -29,6 +31,9 @@ struct TransitDataIndex {
             var scheduleMap: [String: RouteStopSchedule] = [:]
             for schedule in schedules {
                 allStopsByID[schedule.stop.id] = schedule.stop
+                if let stopCode = schedule.stop.stopCode {
+                    stopIDsByCode[stopCode, default: []].insert(schedule.stop.id)
+                }
                 routeKeysByStopID[schedule.stop.id, default: []].insert(routeKey)
                 if scheduleMap[schedule.stop.id] == nil {
                     scheduleMap[schedule.stop.id] = schedule
@@ -38,6 +43,9 @@ struct TransitDataIndex {
         }
 
         self.allStopsByID = allStopsByID
+        self.stopIDsByCode = stopIDsByCode.mapValues {
+            $0.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        }
         self.routeKeysByStopID = routeKeysByStopID.mapValues {
             $0.sorted { lhs, rhs in
                 if lhs.route != rhs.route {

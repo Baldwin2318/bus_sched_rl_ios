@@ -49,20 +49,6 @@ struct ContentView: View {
                         }
                     }
 
-                    if !viewModel.mainAlerts.isEmpty {
-                        Section {
-                            ForEach(viewModel.mainAlerts) { alert in
-                                ServiceAlertView(alert: alert)
-                                    .listRowStyling()
-                            }
-                        } header: {
-                            sectionHeader(
-                                title: "Warnings",
-                                count: viewModel.mainAlerts.count
-                            )
-                        }
-                    }
-
                     if !viewModel.favoriteCards.isEmpty {
                         Section {
                             ForEach(viewModel.favoriteCards) { card in
