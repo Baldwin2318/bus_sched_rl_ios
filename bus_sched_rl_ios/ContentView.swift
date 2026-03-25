@@ -10,6 +10,7 @@ struct ContentView: View {
     @StateObject private var viewModel = NearbyETAViewModel()
     @StateObject private var locationService = LocationService()
     @State private var navigationPath: [NearbyETACard] = []
+    @State private var isShowingAboutSheet = false
     @FocusState private var isSearchFocused: Bool
 
     var body: some View {
@@ -124,23 +125,26 @@ struct ContentView: View {
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
-//            .toolbar {
-//                ToolbarItem(placement: .topBarTrailing) {
-//                    Button {
-//                        viewModel.refreshManually()
-//                    } label: {
-//                        if viewModel.isRefreshing {
-//                            ProgressView()
-//                                .controlSize(.small)
-//                        } else {
-//                            Image(systemName: "arrow.clockwise")
-//                                .font(.headline.weight(.semibold))
-//                        }
-//                    }
-//                    .disabled(viewModel.isRefreshing)
-//                    .accessibilityLabel("Refresh arrivals")
-//                }
-//            }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button {
+                            isShowingAboutSheet = true
+                        } label: {
+                            Label("About", systemImage: "info.circle")
+                        }
+                        .accessibilityIdentifier("about-menu-item")
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                    .accessibilityLabel("Settings")
+                    .accessibilityIdentifier("settings-menu-button")
+                }
+            }
+        }
+        .sheet(isPresented: $isShowingAboutSheet) {
+            AboutView()
+                .accessibilityIdentifier("about-sheet")
         }
         .task {
             viewModel.loadIfNeeded()
