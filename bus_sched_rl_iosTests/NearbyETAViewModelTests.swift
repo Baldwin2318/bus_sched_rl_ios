@@ -695,6 +695,184 @@ final class NearbyETAViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.alerts(for: card).map(\.id), ["detail-match"])
     }
 
+    func testStaticDataOlderThanSixMonthsShowsRefreshState() async throws {
+        let routeKey = RouteKey(route: "55", direction: "0")
+        let stop = BusStop(
+            id: "stop-1",
+            name: "Main Stop",
+            coord: CLLocationCoordinate2D(latitude: 45.50, longitude: -73.60)
+        )
+        let staticData = GTFSStaticData(
+            routeStops: [routeKey: [stop]],
+            routeStopSchedules: [
+                routeKey: [
+                    RouteStopSchedule(
+                        stop: stop,
+                        sequence: 1,
+                        scheduledArrival: "08:00:00",
+                        scheduledDeparture: nil
+                    )
+                ]
+            ],
+            routeDirectionLabels: [routeKey: "Nord"],
+            routeNamesByRouteID: ["55": GTFSRouteName(shortName: "55", longName: "Mock Route")],
+            routeStylesByRouteID: [:],
+            feedInfo: nil
+        )
+        let staleMetadata = GTFSCacheMetadata(
+            lastUpdatedAt: Calendar.current.date(byAdding: .month, value: -7, to: Date()),
+            etag: nil,
+            lastModified: nil,
+            feedInfo: nil
+        )
+        let viewModel = NearbyETAViewModel(
+            gtfsRepository: StaticRepository(staticData: staticData, metadata: staleMetadata),
+            realtimeRepository: SnapshotRepository(snapshot: RealtimeSnapshot(vehicles: [], tripUpdates: [])),
+            livePollInterval: .seconds(120)
+        )
+
+        viewModel.loadIfNeeded()
+        try await waitUntil { viewModel.phase == .ready }
+
+        XCTAssertTrue(viewModel.staticDataNeedsRefresh)
+        XCTAssertTrue(viewModel.showsStaticDataUpdatePrompt)
+        XCTAssertEqual(viewModel.staticDataStatusTitle, "Transit data update available")
+    }
+
+    func testStaticDataNewerThanSixMonthsHidesRefreshPrompt() async throws {
+        let routeKey = RouteKey(route: "55", direction: "0")
+        let stop = BusStop(
+            id: "stop-1",
+            name: "Main Stop",
+            coord: CLLocationCoordinate2D(latitude: 45.50, longitude: -73.60)
+        )
+        let staticData = GTFSStaticData(
+            routeStops: [routeKey: [stop]],
+            routeStopSchedules: [
+                routeKey: [
+                    RouteStopSchedule(
+                        stop: stop,
+                        sequence: 1,
+                        scheduledArrival: "08:00:00",
+                        scheduledDeparture: nil
+                    )
+                ]
+            ],
+            routeDirectionLabels: [routeKey: "Nord"],
+            routeNamesByRouteID: ["55": GTFSRouteName(shortName: "55", longName: "Mock Route")],
+            routeStylesByRouteID: [:],
+            feedInfo: nil
+        )
+        let freshMetadata = GTFSCacheMetadata(
+            lastUpdatedAt: Calendar.current.date(byAdding: .month, value: -2, to: Date()),
+            etag: nil,
+            lastModified: nil,
+            feedInfo: nil
+        )
+        let viewModel = NearbyETAViewModel(
+            gtfsRepository: StaticRepository(staticData: staticData, metadata: freshMetadata),
+            realtimeRepository: SnapshotRepository(snapshot: RealtimeSnapshot(vehicles: [], tripUpdates: [])),
+            livePollInterval: .seconds(120)
+        )
+
+        viewModel.loadIfNeeded()
+        try await waitUntil { viewModel.phase == .ready }
+
+        XCTAssertFalse(viewModel.staticDataNeedsRefresh)
+        XCTAssertFalse(viewModel.showsStaticDataUpdatePrompt)
+    }
+
+    func testRedownloadStaticDataForcesRefreshAndUpdatesMetadata() async throws {
+        let oldRouteKey = RouteKey(route: "55", direction: "0")
+        let newRouteKey = RouteKey(route: "80", direction: "0")
+        let oldStop = BusStop(
+            id: "stop-1",
+            name: "Main Stop",
+            coord: CLLocationCoordinate2D(latitude: 45.50, longitude: -73.60)
+        )
+        let newStop = BusStop(
+            id: "stop-2",
+            name: "Second Stop",
+            coord: CLLocationCoordinate2D(latitude: 45.51, longitude: -73.61)
+        )
+        let initialStaticData = GTFSStaticData(
+            routeStops: [oldRouteKey: [oldStop]],
+            routeStopSchedules: [
+                oldRouteKey: [
+                    RouteStopSchedule(
+                        stop: oldStop,
+                        sequence: 1,
+                        scheduledArrival: "08:00:00",
+                        scheduledDeparture: nil
+                    )
+                ]
+            ],
+            routeDirectionLabels: [oldRouteKey: "Nord"],
+            routeNamesByRouteID: ["55": GTFSRouteName(shortName: "55", longName: "Mock Route")],
+            routeStylesByRouteID: [:],
+            feedInfo: nil
+        )
+        let refreshedStaticData = GTFSStaticData(
+            routeStops: [newRouteKey: [newStop]],
+            routeStopSchedules: [
+                newRouteKey: [
+                    RouteStopSchedule(
+                        stop: newStop,
+                        sequence: 1,
+                        scheduledArrival: "09:00:00",
+                        scheduledDeparture: nil
+                    )
+                ]
+            ],
+            routeDirectionLabels: [newRouteKey: "Sud"],
+            routeNamesByRouteID: ["80": GTFSRouteName(shortName: "80", longName: "Updated Route")],
+            routeStylesByRouteID: [:],
+            feedInfo: nil
+        )
+        let staleMetadata = GTFSCacheMetadata(
+            lastUpdatedAt: Calendar.current.date(byAdding: .month, value: -7, to: Date()),
+            etag: nil,
+            lastModified: nil,
+            feedInfo: nil
+        )
+        let refreshedMetadata = GTFSCacheMetadata(
+            lastUpdatedAt: Date(),
+            etag: "new-etag",
+            lastModified: nil,
+            feedInfo: nil
+        )
+        let repository = StaticRepository(
+            staticData: initialStaticData,
+            metadata: staleMetadata,
+            refreshedStaticData: refreshedStaticData,
+            refreshedMetadata: refreshedMetadata
+        )
+        let viewModel = NearbyETAViewModel(
+            gtfsRepository: repository,
+            realtimeRepository: SnapshotRepository(snapshot: RealtimeSnapshot(vehicles: [], tripUpdates: [])),
+            livePollInterval: .seconds(120)
+        )
+
+        viewModel.updateLocationAuthorization(.denied)
+        viewModel.loadIfNeeded()
+        try await waitUntil { viewModel.phase == .ready }
+
+        XCTAssertTrue(viewModel.staticDataNeedsRefresh)
+
+        viewModel.redownloadStaticData()
+
+        try await waitUntil {
+            !viewModel.isRefreshingStaticData &&
+                viewModel.nearbyCards.contains(where: { $0.routeID == "80" })
+        }
+
+        XCTAssertEqual(await repository.forcedRefreshRequests(), [true])
+        XCTAssertFalse(viewModel.staticDataNeedsRefresh)
+        XCTAssertFalse(viewModel.showsStaticDataUpdatePrompt)
+        XCTAssertEqual(viewModel.staticCacheMetadata.lastUpdatedAt, refreshedMetadata.lastUpdatedAt)
+        XCTAssertTrue(viewModel.nearbyCards.contains(where: { $0.routeID == "80" }))
+    }
+
     private func waitUntil(
         timeoutSeconds: TimeInterval = 2.0,
         condition: @escaping () -> Bool
@@ -737,9 +915,21 @@ final class NearbyETAViewModelTests: XCTestCase {
 
 private actor StaticRepository: GTFSRepository {
     let staticData: GTFSStaticData
+    private let refreshedStaticData: GTFSStaticData?
+    private var metadata: GTFSCacheMetadata
+    private let refreshedMetadata: GTFSCacheMetadata?
+    private var refreshForceFlags: [Bool] = []
 
-    init(staticData: GTFSStaticData) {
+    init(
+        staticData: GTFSStaticData,
+        metadata: GTFSCacheMetadata = .empty,
+        refreshedStaticData: GTFSStaticData? = nil,
+        refreshedMetadata: GTFSCacheMetadata? = nil
+    ) {
         self.staticData = staticData
+        self.metadata = metadata
+        self.refreshedStaticData = refreshedStaticData
+        self.refreshedMetadata = refreshedMetadata
     }
 
     func loadStaticData() async throws -> GTFSStaticData {
@@ -747,11 +937,19 @@ private actor StaticRepository: GTFSRepository {
     }
 
     func refreshStaticData(force: Bool) async throws -> GTFSStaticData {
-        staticData
+        refreshForceFlags.append(force)
+        if let refreshedMetadata {
+            metadata = refreshedMetadata
+        }
+        return refreshedStaticData ?? staticData
     }
 
     func cacheMetadata() async -> GTFSCacheMetadata {
-        .empty
+        metadata
+    }
+
+    func forcedRefreshRequests() async -> [Bool] {
+        refreshForceFlags
     }
 }
 

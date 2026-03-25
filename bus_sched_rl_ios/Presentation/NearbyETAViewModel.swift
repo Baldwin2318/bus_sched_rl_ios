@@ -14,6 +14,10 @@ final class NearbyETAViewModel: ObservableObject {
         static let maxDetailAlerts = 4
     }
 
+    private enum StaticDataConfig {
+        static let refreshIntervalMonths = 6
+    }
+
     @Published var query: String = "" {
         didSet {
             guard query != oldValue else { return }
@@ -28,8 +32,10 @@ final class NearbyETAViewModel: ObservableObject {
     @Published private(set) var searchResults: [SearchResult] = []
     @Published private(set) var phase: NearbyETAPhase = .idle
     @Published private(set) var isRefreshing = false
+    @Published private(set) var isRefreshingStaticData = false
     @Published private(set) var liveStatusMessage: String?
     @Published private(set) var lastUpdatedAt: Date?
+    @Published private(set) var staticCacheMetadata: GTFSCacheMetadata = .empty
     @Published private(set) var activeScope: NearbyETAScope = .nearby
     @Published private(set) var selectedResult: SearchResult?
 
@@ -106,6 +112,33 @@ final class NearbyETAViewModel: ObservableObject {
         }
     }
 
+    var staticDataNeedsRefresh: Bool {
+        guard let lastUpdatedAt = staticCacheMetadata.lastUpdatedAt else { return false }
+        guard let refreshThreshold = Calendar.current.date(
+            byAdding: .month,
+            value: -StaticDataConfig.refreshIntervalMonths,
+            to: Date()
+        ) else {
+            return false
+        }
+        return lastUpdatedAt < refreshThreshold
+    }
+
+    var showsStaticDataUpdatePrompt: Bool {
+        staticDataNeedsRefresh
+    }
+
+    var staticDataStatusTitle: String {
+        "Transit data update available"
+    }
+
+    var staticDataStatusBody: String {
+        guard let lastUpdatedAt = staticCacheMetadata.lastUpdatedAt else {
+            return "You can redownload the GTFS dataset here every 6 months."
+        }
+        return "Last downloaded \(lastUpdatedAt.formatted(date: .abbreviated, time: .omitted)). Redownload the GTFS dataset to refresh schedule data."
+    }
+
     func loadIfNeeded() {
         guard !hasLoaded else { return }
         hasLoaded = true
@@ -115,6 +148,7 @@ final class NearbyETAViewModel: ObservableObject {
             do {
                 let staticData = try await gtfsRepository.loadStaticData()
                 await applyStaticData(staticData)
+                await refreshStaticCacheMetadata()
                 phase = .ready
                 refreshCards()
                 startLivePollingIfNeeded()
@@ -174,6 +208,31 @@ final class NearbyETAViewModel: ObservableObject {
 
     func refreshManually() {
         refreshNow(trigger: .manual)
+    }
+
+    func redownloadStaticData() {
+        guard !isRefreshingStaticData else { return }
+        isRefreshingStaticData = true
+
+        Task {
+            do {
+                let staticData = try await gtfsRepository.refreshStaticData(force: true)
+                await applyStaticData(staticData)
+                await refreshStaticCacheMetadata()
+                await MainActor.run {
+                    self.liveStatusMessage = nil
+                    self.refreshCards()
+                }
+            } catch {
+                await MainActor.run {
+                    self.liveStatusMessage = "Transit data update failed. Please try again."
+                }
+            }
+
+            await MainActor.run {
+                self.isRefreshingStaticData = false
+            }
+        }
     }
 
     func beginDetailRefresh() {
@@ -530,6 +589,13 @@ final class NearbyETAViewModel: ObservableObject {
             SearchIndexBuilder.build(from: staticData)
         }.value
         scheduleSearch()
+    }
+
+    private func refreshStaticCacheMetadata() async {
+        let metadata = await gtfsRepository.cacheMetadata()
+        await MainActor.run {
+            self.staticCacheMetadata = metadata
+        }
     }
 
     private func startLivePollingIfNeeded() {

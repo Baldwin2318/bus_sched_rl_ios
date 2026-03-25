@@ -29,6 +29,12 @@ struct ContentView: View {
                                 .listRowStyling()
                         }
 
+                        if viewModel.showsStaticDataUpdatePrompt {
+                            staticDataUpdatePanel
+                                .listRowStyling()
+                                .accessibilityIdentifier("static-data-update-panel")
+                        }
+
                         if let liveStatusMessage = viewModel.liveStatusMessage {
                             statusBanner(text: liveStatusMessage, tint: .orange)
                                 .listRowStyling()
@@ -245,6 +251,42 @@ struct ContentView: View {
         case .authorized:
             return ""
         }
+    }
+
+    private var staticDataUpdatePanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(viewModel.staticDataStatusTitle)
+                .font(.headline)
+            Text(viewModel.staticDataStatusBody)
+                .font(.subheadline)
+                .foregroundStyle(NearbyETATheme.secondaryText)
+
+            Button {
+                viewModel.redownloadStaticData()
+            } label: {
+                HStack(spacing: 8) {
+                    if viewModel.isRefreshingStaticData {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.down.circle")
+                    }
+                    Text("Redownload transit data")
+                }
+            }
+            .buttonStyle(.bordered)
+            .disabled(viewModel.isRefreshingStaticData)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(NearbyETATheme.panel)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(NearbyETATheme.panelBorder, lineWidth: 1)
+        )
     }
 
     private func statusBanner(text: String, tint: Color) -> some View {
