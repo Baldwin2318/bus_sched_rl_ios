@@ -10,8 +10,18 @@ struct ArrivalDetailModel: Equatable {
     let etaText: String
     let arrivalTimeText: String
     let distanceText: String?
+    let statusText: String?
+    let delayText: String?
+    let assignedStopText: String?
+    let occupancyText: String?
+    let congestionText: String?
 
-    init(card: NearbyETACard) {
+    init(
+        card: NearbyETACard,
+        vehicle: VehiclePosition?,
+        tripUpdate: TripUpdatePayload?,
+        assignedStopName: String?
+    ) {
         routeShortName = card.routeShortName
         routeLongName = card.routeLongName
         directionText = card.directionText
@@ -44,6 +54,27 @@ struct ArrivalDetailModel: Equatable {
         } else {
             distanceText = nil
         }
+
+        statusText = vehicle?.currentStatus?.title
+
+        let stopDelaySeconds = tripUpdate?.stopTimeUpdates.first(where: {
+            ($0.assignedStopID ?? $0.stopID) == card.stopID || $0.stopID == card.stopID
+        })?.delaySeconds
+        let effectiveDelay = stopDelaySeconds ?? tripUpdate?.delaySeconds
+        delayText = effectiveDelay.map(TransitText.delayText(seconds:))
+
+        if let assignedStopName, assignedStopName != card.stopName {
+            assignedStopText = assignedStopName
+        } else {
+            assignedStopText = nil
+        }
+
+        if let percentage = vehicle?.occupancyPercentage {
+            occupancyText = "\(percentage)% occupied"
+        } else {
+            occupancyText = vehicle?.occupancyStatus?.title
+        }
+        congestionText = vehicle?.congestionLevel?.title
     }
 }
 
@@ -58,11 +89,24 @@ struct ArrivalDetailView: View {
     }
 
     private var model: ArrivalDetailModel {
-        ArrivalDetailModel(card: currentCard)
+        ArrivalDetailModel(
+            card: currentCard,
+            vehicle: liveVehicle,
+            tripUpdate: tripUpdate,
+            assignedStopName: assignedStop?.name
+        )
     }
 
     private var liveVehicle: VehiclePosition? {
         viewModel.liveVehicle(for: currentCard)
+    }
+
+    private var tripUpdate: TripUpdatePayload? {
+        viewModel.tripUpdate(for: currentCard)
+    }
+
+    private var assignedStop: BusStop? {
+        viewModel.assignedStop(for: currentCard)
     }
 
     private var liveMapModel: ArrivalLiveMapModel? {
@@ -137,6 +181,21 @@ struct ArrivalDetailView: View {
                     detailRow(title: "Route", value: "\(model.routeShortName) \(model.routeLongName)")
                     detailRow(title: "Direction", value: model.directionText)
                     detailRow(title: "Stop", value: model.stopName)
+                    if let statusText = model.statusText {
+                        detailRow(title: "Bus status", value: statusText)
+                    }
+                    if let delayText = model.delayText {
+                        detailRow(title: "Delay", value: delayText)
+                    }
+                    if let assignedStopText = model.assignedStopText {
+                        detailRow(title: "Assigned stop", value: assignedStopText)
+                    }
+                    if let occupancyText = model.occupancyText {
+                        detailRow(title: "Occupancy", value: occupancyText)
+                    }
+                    if let congestionText = model.congestionText {
+                        detailRow(title: "Traffic", value: congestionText)
+                    }
                     detailRow(title: "Arrival time", value: model.arrivalTimeText)
                     if let distanceText = model.distanceText {
                         detailRow(title: "Distance", value: distanceText)

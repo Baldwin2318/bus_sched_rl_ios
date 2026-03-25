@@ -55,6 +55,26 @@ final class RealtimeAlertParserTests: XCTestCase {
         XCTAssertTrue(parsedAlerts.isEmpty)
     }
 
+    func testParseAlertsIncludesEffectAndCauseLabels() {
+        var feed = TransitRealtime_FeedMessage()
+        var entity = TransitRealtime_FeedEntity()
+        entity.id = "alert-2"
+
+        var alert = TransitRealtime_Alert()
+        alert.headerText = translatedString("Detour on Route 55")
+        alert.cause = .construction
+        alert.effect = .detour
+        alert.severityLevel = .warning
+
+        entity.alert = alert
+        feed.entity = [entity]
+
+        let parsedAlerts = GTFSRealtimeAlertParser.parseAlerts(from: feed)
+
+        XCTAssertEqual(parsedAlerts.first?.effectText, "Detour")
+        XCTAssertEqual(parsedAlerts.first?.causeText, "Construction")
+    }
+
     private func translatedString(_ text: String) -> TransitRealtime_TranslatedString {
         var translated = TransitRealtime_TranslatedString()
         var translation = TransitRealtime_TranslatedString.Translation()

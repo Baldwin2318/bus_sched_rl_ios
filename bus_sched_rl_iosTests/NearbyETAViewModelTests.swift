@@ -695,6 +695,96 @@ final class NearbyETAViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.alerts(for: card).map(\.id), ["detail-match"])
     }
 
+    func testDetailHelpersResolveTripUpdateAndAssignedStop() async throws {
+        let routeKey = RouteKey(route: "55", direction: "0")
+        let originalStop = BusStop(
+            id: "stop-1",
+            name: "Main Stop",
+            coord: CLLocationCoordinate2D(latitude: 45.50, longitude: -73.60)
+        )
+        let reassignedStop = BusStop(
+            id: "stop-2",
+            name: "Temporary Stop",
+            coord: CLLocationCoordinate2D(latitude: 45.501, longitude: -73.601)
+        )
+        let staticData = GTFSStaticData(
+            routeStops: [routeKey: [originalStop, reassignedStop]],
+            routeStopSchedules: [
+                routeKey: [
+                    RouteStopSchedule(
+                        stop: originalStop,
+                        sequence: 1,
+                        scheduledArrival: "08:00:00",
+                        scheduledDeparture: nil
+                    ),
+                    RouteStopSchedule(
+                        stop: reassignedStop,
+                        sequence: 2,
+                        scheduledArrival: "08:05:00",
+                        scheduledDeparture: nil
+                    )
+                ]
+            ],
+            routeDirectionLabels: [routeKey: "Nord"],
+            routeNamesByRouteID: ["55": GTFSRouteName(shortName: "55", longName: "Mock Route")],
+            routeStylesByRouteID: [:],
+            feedInfo: nil
+        )
+        let now = Date()
+        let snapshot = RealtimeSnapshot(
+            vehicles: [
+                VehiclePosition(
+                    id: "vehicle-1",
+                    tripID: "trip-1",
+                    route: "55",
+                    direction: 0,
+                    stopID: "stop-1",
+                    currentStatus: .incomingAt,
+                    congestionLevel: .congestion,
+                    occupancyStatus: .standingRoomOnly,
+                    occupancyPercentage: 78,
+                    heading: 90,
+                    coord: CLLocationCoordinate2D(latitude: 45.5004, longitude: -73.6004),
+                    lastUpdatedAt: now
+                )
+            ],
+            tripUpdates: [
+                TripUpdatePayload(
+                    tripID: "trip-1",
+                    routeID: "55",
+                    directionID: 0,
+                    vehicleID: "vehicle-1",
+                    timestamp: now,
+                    delaySeconds: 240,
+                    stopTimeUpdates: [
+                        TripStopTimeUpdate(
+                            stopID: "stop-1",
+                            stopSequence: 1,
+                            arrivalTime: now.addingTimeInterval(4 * 60),
+                            departureTime: nil,
+                            assignedStopID: "stop-2",
+                            delaySeconds: 240
+                        )
+                    ]
+                )
+            ]
+        )
+        let viewModel = NearbyETAViewModel(
+            gtfsRepository: StaticRepository(staticData: staticData),
+            realtimeRepository: SnapshotRepository(snapshot: snapshot),
+            livePollInterval: .seconds(120)
+        )
+
+        viewModel.updateUserLocation(CLLocationCoordinate2D(latitude: 45.5001, longitude: -73.6001))
+        viewModel.loadIfNeeded()
+
+        try await waitUntil { !viewModel.cards.isEmpty }
+        let card = try XCTUnwrap(viewModel.cards.first)
+
+        XCTAssertEqual(viewModel.tripUpdate(for: card)?.delaySeconds, 240)
+        XCTAssertEqual(viewModel.assignedStop(for: card)?.id, "stop-2")
+    }
+
     func testStaticDataOlderThanSixMonthsShowsRefreshState() async throws {
         let routeKey = RouteKey(route: "55", direction: "0")
         let stop = BusStop(

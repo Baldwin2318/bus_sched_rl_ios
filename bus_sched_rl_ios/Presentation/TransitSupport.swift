@@ -16,6 +16,17 @@ enum TransitMath {
 }
 
 enum TransitText {
+    static func delayText(seconds: Int) -> String {
+        let absoluteMinutes = max(1, Int(round(Double(abs(seconds)) / 60)))
+        if seconds > 0 {
+            return "\(absoluteMinutes) min late"
+        }
+        if seconds < 0 {
+            return "\(absoluteMinutes) min early"
+        }
+        return "On time"
+    }
+
     static func fallbackDirectionText(_ directionID: String) -> String {
         switch directionID {
         case "0":

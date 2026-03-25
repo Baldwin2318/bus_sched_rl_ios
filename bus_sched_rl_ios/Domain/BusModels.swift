@@ -106,11 +106,88 @@ struct GTFSStaticData {
     }
 }
 
+enum VehicleStopStatus: String, Equatable {
+    case incomingAt
+    case stoppedAt
+    case inTransitTo
+
+    var title: String {
+        switch self {
+        case .incomingAt:
+            return "Approaching stop"
+        case .stoppedAt:
+            return "At stop"
+        case .inTransitTo:
+            return "In transit"
+        }
+    }
+}
+
+enum VehicleCongestionLevel: String, Equatable {
+    case runningSmoothly
+    case stopAndGo
+    case congestion
+    case severeCongestion
+
+    var title: String {
+        switch self {
+        case .runningSmoothly:
+            return "Traffic flowing"
+        case .stopAndGo:
+            return "Stop-and-go traffic"
+        case .congestion:
+            return "Congestion"
+        case .severeCongestion:
+            return "Severe congestion"
+        }
+    }
+}
+
+enum VehicleOccupancyStatus: String, Equatable {
+    case empty
+    case manySeatsAvailable
+    case fewSeatsAvailable
+    case standingRoomOnly
+    case crushedStandingRoomOnly
+    case full
+    case notAcceptingPassengers
+    case noDataAvailable
+    case notBoardable
+
+    var title: String {
+        switch self {
+        case .empty:
+            return "Empty"
+        case .manySeatsAvailable:
+            return "Many seats available"
+        case .fewSeatsAvailable:
+            return "Few seats available"
+        case .standingRoomOnly:
+            return "Standing room only"
+        case .crushedStandingRoomOnly:
+            return "Crowded standing room only"
+        case .full:
+            return "Full"
+        case .notAcceptingPassengers:
+            return "Not accepting passengers"
+        case .noDataAvailable:
+            return "Occupancy unavailable"
+        case .notBoardable:
+            return "Not boardable"
+        }
+    }
+}
+
 struct VehiclePosition: Identifiable, Equatable {
     let id: String
     let tripID: String?
     let route: String?
     let direction: Int?
+    let stopID: String?
+    let currentStatus: VehicleStopStatus?
+    let congestionLevel: VehicleCongestionLevel?
+    let occupancyStatus: VehicleOccupancyStatus?
+    let occupancyPercentage: Int?
     let heading: Double
     let coord: CLLocationCoordinate2D
     let lastUpdatedAt: Date?
@@ -120,6 +197,11 @@ struct VehiclePosition: Identifiable, Equatable {
         tripID: String?,
         route: String?,
         direction: Int?,
+        stopID: String? = nil,
+        currentStatus: VehicleStopStatus? = nil,
+        congestionLevel: VehicleCongestionLevel? = nil,
+        occupancyStatus: VehicleOccupancyStatus? = nil,
+        occupancyPercentage: Int? = nil,
         heading: Double,
         coord: CLLocationCoordinate2D,
         lastUpdatedAt: Date? = nil
@@ -128,6 +210,11 @@ struct VehiclePosition: Identifiable, Equatable {
         self.tripID = tripID
         self.route = route
         self.direction = direction
+        self.stopID = stopID
+        self.currentStatus = currentStatus
+        self.congestionLevel = congestionLevel
+        self.occupancyStatus = occupancyStatus
+        self.occupancyPercentage = occupancyPercentage
         self.heading = heading
         self.coord = coord
         self.lastUpdatedAt = lastUpdatedAt
@@ -138,6 +225,11 @@ struct VehiclePosition: Identifiable, Equatable {
             lhs.tripID == rhs.tripID &&
             lhs.route == rhs.route &&
             lhs.direction == rhs.direction &&
+            lhs.stopID == rhs.stopID &&
+            lhs.currentStatus == rhs.currentStatus &&
+            lhs.congestionLevel == rhs.congestionLevel &&
+            lhs.occupancyStatus == rhs.occupancyStatus &&
+            lhs.occupancyPercentage == rhs.occupancyPercentage &&
             lhs.heading == rhs.heading &&
             lhs.coord.latitude == rhs.coord.latitude &&
             lhs.coord.longitude == rhs.coord.longitude &&
@@ -150,6 +242,24 @@ struct TripStopTimeUpdate: Hashable {
     let stopSequence: Int?
     let arrivalTime: Date?
     let departureTime: Date?
+    let assignedStopID: String?
+    let delaySeconds: Int?
+
+    init(
+        stopID: String?,
+        stopSequence: Int?,
+        arrivalTime: Date?,
+        departureTime: Date?,
+        assignedStopID: String? = nil,
+        delaySeconds: Int? = nil
+    ) {
+        self.stopID = stopID
+        self.stopSequence = stopSequence
+        self.arrivalTime = arrivalTime
+        self.departureTime = departureTime
+        self.assignedStopID = assignedStopID
+        self.delaySeconds = delaySeconds
+    }
 }
 
 struct TripUpdatePayload: Hashable {
@@ -158,7 +268,26 @@ struct TripUpdatePayload: Hashable {
     let directionID: Int?
     let vehicleID: String?
     let timestamp: Date?
+    let delaySeconds: Int?
     let stopTimeUpdates: [TripStopTimeUpdate]
+
+    init(
+        tripID: String,
+        routeID: String?,
+        directionID: Int?,
+        vehicleID: String?,
+        timestamp: Date?,
+        delaySeconds: Int? = nil,
+        stopTimeUpdates: [TripStopTimeUpdate]
+    ) {
+        self.tripID = tripID
+        self.routeID = routeID
+        self.directionID = directionID
+        self.vehicleID = vehicleID
+        self.timestamp = timestamp
+        self.delaySeconds = delaySeconds
+        self.stopTimeUpdates = stopTimeUpdates
+    }
 }
 
 struct RealtimeSnapshot {

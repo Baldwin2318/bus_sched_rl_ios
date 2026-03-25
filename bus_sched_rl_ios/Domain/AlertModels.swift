@@ -49,9 +49,33 @@ struct ServiceAlert: Identifiable, Codable, Hashable {
     let title: String
     let message: String?
     let severity: AlertSeverity
+    let causeText: String?
+    let effectText: String?
     let url: URL?
     let activePeriods: [DateInterval]
     let scopes: [AlertScopeSelector]
+
+    init(
+        id: String,
+        title: String,
+        message: String?,
+        severity: AlertSeverity,
+        causeText: String? = nil,
+        effectText: String? = nil,
+        url: URL?,
+        activePeriods: [DateInterval],
+        scopes: [AlertScopeSelector]
+    ) {
+        self.id = id
+        self.title = title
+        self.message = message
+        self.severity = severity
+        self.causeText = causeText
+        self.effectText = effectText
+        self.url = url
+        self.activePeriods = activePeriods
+        self.scopes = scopes
+    }
 
     var isGlobal: Bool {
         scopes.isEmpty || scopes.contains(where: \.isGlobal)

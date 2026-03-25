@@ -71,6 +71,11 @@ actor STMRealtimeRepository: RealtimeRepository {
                 tripID: normalized(vehicle.trip.tripID),
                 route: normalized(vehicle.trip.routeID),
                 direction: vehicle.trip.hasDirectionID ? Int(vehicle.trip.directionID) : nil,
+                stopID: normalized(vehicle.hasStopID ? vehicle.stopID : nil),
+                currentStatus: vehicle.hasCurrentStatus ? parseVehicleStopStatus(vehicle.currentStatus) : nil,
+                congestionLevel: vehicle.hasCongestionLevel ? parseCongestionLevel(vehicle.congestionLevel) : nil,
+                occupancyStatus: vehicle.hasOccupancyStatus ? parseOccupancyStatus(vehicle.occupancyStatus) : nil,
+                occupancyPercentage: vehicle.hasOccupancyPercentage ? Int(vehicle.occupancyPercentage) : nil,
                 heading: Double(pos.bearing),
                 coord: CLLocationCoordinate2D(
                     latitude: CLLocationDegrees(latitude),
@@ -97,13 +102,20 @@ actor STMRealtimeRepository: RealtimeRepository {
                 let departure = update.hasDeparture ? stopTimeEventDate(update.departure) : nil
                 let stopID = normalized(update.stopID)
                 let stopSequence = update.hasStopSequence ? Int(update.stopSequence) : nil
+                let assignedStopID = update.hasStopTimeProperties
+                    ? normalized(update.stopTimeProperties.hasAssignedStopID ? update.stopTimeProperties.assignedStopID : nil)
+                    : nil
+                let eventDelay = stopTimeEventDelay(update.hasArrival ? update.arrival : nil)
+                    ?? stopTimeEventDelay(update.hasDeparture ? update.departure : nil)
 
-                guard stopID != nil || stopSequence != nil || arrival != nil || departure != nil else { return nil }
+                guard stopID != nil || stopSequence != nil || arrival != nil || departure != nil || assignedStopID != nil else { return nil }
                 return TripStopTimeUpdate(
                     stopID: stopID,
                     stopSequence: stopSequence,
                     arrivalTime: arrival,
-                    departureTime: departure
+                    departureTime: departure,
+                    assignedStopID: assignedStopID,
+                    delaySeconds: eventDelay
                 )
             }
 
@@ -113,6 +125,7 @@ actor STMRealtimeRepository: RealtimeRepository {
                 directionID: tripUpdate.trip.hasDirectionID ? Int(tripUpdate.trip.directionID) : nil,
                 vehicleID: tripUpdate.hasVehicle ? normalized(tripUpdate.vehicle.id) : nil,
                 timestamp: tripUpdate.hasTimestamp ? Date(timeIntervalSince1970: TimeInterval(tripUpdate.timestamp)) : nil,
+                delaySeconds: tripUpdate.hasDelay ? Int(tripUpdate.delay) : nil,
                 stopTimeUpdates: stopUpdates
             )
         }
@@ -148,10 +161,70 @@ actor STMRealtimeRepository: RealtimeRepository {
         return Date(timeIntervalSince1970: TimeInterval(event.time))
     }
 
+    private func stopTimeEventDelay(_ event: TransitRealtime_TripUpdate.StopTimeEvent?) -> Int? {
+        guard let event, event.hasDelay else { return nil }
+        return Int(event.delay)
+    }
+
     private func normalized(_ value: String?) -> String? {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func parseVehicleStopStatus(
+        _ status: TransitRealtime_VehiclePosition.VehicleStopStatus
+    ) -> VehicleStopStatus {
+        switch status {
+        case .incomingAt:
+            return .incomingAt
+        case .stoppedAt:
+            return .stoppedAt
+        case .inTransitTo:
+            return .inTransitTo
+        }
+    }
+
+    private func parseCongestionLevel(
+        _ level: TransitRealtime_VehiclePosition.CongestionLevel
+    ) -> VehicleCongestionLevel? {
+        switch level {
+        case .runningSmoothly:
+            return .runningSmoothly
+        case .stopAndGo:
+            return .stopAndGo
+        case .congestion:
+            return .congestion
+        case .severeCongestion:
+            return .severeCongestion
+        case .unknownCongestionLevel:
+            return nil
+        }
+    }
+
+    private func parseOccupancyStatus(
+        _ status: TransitRealtime_VehiclePosition.OccupancyStatus
+    ) -> VehicleOccupancyStatus? {
+        switch status {
+        case .empty:
+            return .empty
+        case .manySeatsAvailable:
+            return .manySeatsAvailable
+        case .fewSeatsAvailable:
+            return .fewSeatsAvailable
+        case .standingRoomOnly:
+            return .standingRoomOnly
+        case .crushedStandingRoomOnly:
+            return .crushedStandingRoomOnly
+        case .full:
+            return .full
+        case .notAcceptingPassengers:
+            return .notAcceptingPassengers
+        case .noDataAvailable:
+            return .noDataAvailable
+        case .notBoardable:
+            return .notBoardable
+        }
     }
 }
 
@@ -176,6 +249,8 @@ struct GTFSRealtimeAlertParser {
                 title: title,
                 message: message,
                 severity: severity(alert.severityLevel, effect: alert.effect),
+                causeText: causeSummary(alert.cause, detail: translatedText(alert.causeDetail)),
+                effectText: effectSummary(alert.effect, detail: translatedText(alert.effectDetail)),
                 url: translatedURL(alert.url),
                 activePeriods: activePeriods,
                 scopes: scopes
@@ -234,7 +309,50 @@ struct GTFSRealtimeAlertParser {
         }
     }
 
-    private static func effectSummary(_ effect: TransitRealtime_Alert.Effect) -> String? {
+    private static func causeSummary(
+        _ cause: TransitRealtime_Alert.Cause,
+        detail: String?
+    ) -> String? {
+        if let detail, !detail.isEmpty {
+            return detail
+        }
+
+        switch cause {
+        case .technicalProblem:
+            return "Technical problem"
+        case .strike:
+            return "Strike"
+        case .demonstration:
+            return "Demonstration"
+        case .accident:
+            return "Accident"
+        case .holiday:
+            return "Holiday"
+        case .weather:
+            return "Weather"
+        case .maintenance:
+            return "Maintenance"
+        case .construction:
+            return "Construction"
+        case .policeActivity:
+            return "Police activity"
+        case .medicalEmergency:
+            return "Medical emergency"
+        case .otherCause:
+            return "Other cause"
+        case .unknownCause:
+            return nil
+        }
+    }
+
+    private static func effectSummary(
+        _ effect: TransitRealtime_Alert.Effect,
+        detail: String? = nil
+    ) -> String? {
+        if let detail, !detail.isEmpty {
+            return detail
+        }
+
         switch effect {
         case .detour:
             return "Detour"

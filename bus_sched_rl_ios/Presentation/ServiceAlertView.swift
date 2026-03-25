@@ -29,6 +29,17 @@ struct ServiceAlertView: View {
                         .font(.headline)
                         .foregroundStyle(.primary)
 
+                    if alert.effectText != nil || alert.causeText != nil {
+                        HStack(spacing: 8) {
+                            if let effectText = alert.effectText {
+                                alertTag(effectText, tint: iconTint)
+                            }
+                            if let causeText = alert.causeText {
+                                alertTag(causeText, tint: NearbyETATheme.secondaryText)
+                            }
+                        }
+                    }
+
                     if let message = alert.message, !message.isEmpty {
                         Text(message)
                             .font(.subheadline)
@@ -50,6 +61,15 @@ struct ServiceAlertView: View {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .stroke(iconTint.opacity(0.28), lineWidth: 1)
         )
+    }
+
+    private func alertTag(_ text: String, tint: Color) -> some View {
+        Text(text)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(tint.opacity(0.12), in: Capsule())
     }
 
     private var iconName: String {

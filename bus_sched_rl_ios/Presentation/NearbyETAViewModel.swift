@@ -311,6 +311,34 @@ final class NearbyETAViewModel: ObservableObject {
         return nil
     }
 
+    func tripUpdate(for card: NearbyETACard) -> TripUpdatePayload? {
+        if let tripID = card.tripID,
+           let update = snapshot.tripUpdates.first(where: { $0.tripID == tripID }) {
+            return update
+        }
+
+        let routeMatches = snapshot.tripUpdates.filter {
+            $0.routeID == card.routeID && String($0.directionID ?? 0) == card.directionID
+        }
+        if routeMatches.count == 1 {
+            return routeMatches[0]
+        }
+
+        return nil
+    }
+
+    func assignedStop(for card: NearbyETACard) -> BusStop? {
+        guard let tripUpdate = tripUpdate(for: card),
+              let assignedStopID = tripUpdate.stopTimeUpdates.first(where: {
+                  ($0.stopID ?? card.stopID) == card.stopID && $0.assignedStopID != nil
+              })?.assignedStopID ?? tripUpdate.stopTimeUpdates.first(where: { $0.assignedStopID != nil })?.assignedStopID
+        else {
+            return nil
+        }
+
+        return dataIndex?.allStopsByID[assignedStopID]
+    }
+
     func alerts(for card: NearbyETACard) -> [ServiceAlert] {
         scopedAlerts(
             for: [card],
