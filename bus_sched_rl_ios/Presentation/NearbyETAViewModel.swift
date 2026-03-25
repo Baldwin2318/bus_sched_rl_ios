@@ -365,7 +365,8 @@ final class NearbyETAViewModel: ObservableObject {
         scopedAlerts(
             for: [card],
             limit: AlertConfig.maxDetailAlerts,
-            referenceDate: Date()
+            referenceDate: Date(),
+            includeBroadNetworkNotices: false
         )
     }
 
@@ -547,7 +548,8 @@ final class NearbyETAViewModel: ObservableObject {
     private func scopedAlerts(
         for cards: [NearbyETACard],
         limit: Int?,
-        referenceDate: Date
+        referenceDate: Date,
+        includeBroadNetworkNotices: Bool = true
     ) -> [ServiceAlert] {
         let matchedAlerts: [ServiceAlert]
         if cards.isEmpty {
@@ -556,7 +558,10 @@ final class NearbyETAViewModel: ObservableObject {
             }
         } else {
             matchedAlerts = snapshot.alerts.filter { alert in
-                cards.contains { alert.matches(card: $0, at: referenceDate) }
+                if !includeBroadNetworkNotices && alert.isBroadNetworkNotice {
+                    return false
+                }
+                return cards.contains { alert.matches(card: $0, at: referenceDate) }
             }
         }
 
@@ -566,8 +571,8 @@ final class NearbyETAViewModel: ObservableObject {
             }
             .values
             .sorted { lhs, rhs in
-                let lhsRank = severityRank(lhs.severity)
-                let rhsRank = severityRank(rhs.severity)
+                let lhsRank = alertRank(lhs)
+                let rhsRank = alertRank(rhs)
                 if lhsRank != rhsRank {
                     return lhsRank > rhsRank
                 }
@@ -578,6 +583,19 @@ final class NearbyETAViewModel: ObservableObject {
             return Array(sortedAlerts.prefix(limit))
         }
         return sortedAlerts
+    }
+
+    private func alertRank(_ alert: ServiceAlert) -> Int {
+        var rank = severityRank(alert.severity) * 10
+        if alert.isBroadNetworkNotice {
+            rank += 3
+        } else if alert.source == .stmServiceStatus {
+            rank += 2
+        }
+        if alert.isGlobal {
+            rank += 1
+        }
+        return rank
     }
 
     private func severityRank(_ severity: AlertSeverity) -> Int {

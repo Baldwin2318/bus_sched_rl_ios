@@ -916,6 +916,62 @@ final class NearbyETAViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.alerts(for: card).map(\.id), ["detail-match"])
     }
 
+    func testGlobalSTMNoticesStayOnMainScreenButNotDetailAlerts() async throws {
+        let routeKey = RouteKey(route: "55", direction: "0")
+        let stop = BusStop(
+            id: "stop-1",
+            name: "Main Stop",
+            coord: CLLocationCoordinate2D(latitude: 45.50, longitude: -73.60)
+        )
+        let staticData = GTFSStaticData(
+            routeStops: [routeKey: [stop]],
+            routeStopSchedules: [
+                routeKey: [
+                    RouteStopSchedule(
+                        stop: stop,
+                        sequence: 1,
+                        scheduledArrival: "08:00:00",
+                        scheduledDeparture: nil
+                    )
+                ]
+            ],
+            routeDirectionLabels: [routeKey: "Nord"],
+            routeNamesByRouteID: ["55": GTFSRouteName(shortName: "55", longName: "Mock Route")],
+            routeStylesByRouteID: [:],
+            feedInfo: nil
+        )
+        let snapshot = RealtimeSnapshot(
+            vehicles: [],
+            tripUpdates: [],
+            alerts: [
+                ServiceAlert(
+                    id: "stm-global",
+                    source: .stmServiceStatus,
+                    title: "STM network disruption",
+                    message: "System-wide service is affected.",
+                    severity: .severe,
+                    url: nil,
+                    activePeriods: [],
+                    scopes: []
+                )
+            ]
+        )
+        let viewModel = NearbyETAViewModel(
+            gtfsRepository: StaticRepository(staticData: staticData),
+            realtimeRepository: SnapshotRepository(snapshot: snapshot),
+            livePollInterval: .seconds(120)
+        )
+
+        viewModel.updateUserLocation(CLLocationCoordinate2D(latitude: 45.5001, longitude: -73.6001))
+        viewModel.loadIfNeeded()
+
+        try await waitUntil { !viewModel.cards.isEmpty }
+        let card = try XCTUnwrap(viewModel.cards.first)
+
+        XCTAssertEqual(viewModel.mainAlerts.map(\.id), ["stm-global"])
+        XCTAssertTrue(viewModel.alerts(for: card).isEmpty)
+    }
+
     func testDetailHelpersResolveTripUpdateAndAssignedStop() async throws {
         let routeKey = RouteKey(route: "55", direction: "0")
         let originalStop = BusStop(

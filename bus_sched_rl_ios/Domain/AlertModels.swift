@@ -1,5 +1,19 @@
 import Foundation
 
+enum AlertSource: String, Codable, Hashable {
+    case gtfsRealtime
+    case stmServiceStatus
+
+    var title: String {
+        switch self {
+        case .gtfsRealtime:
+            return "Realtime"
+        case .stmServiceStatus:
+            return "STM notice"
+        }
+    }
+}
+
 enum AlertSeverity: String, Codable, Hashable {
     case info
     case warning
@@ -46,6 +60,7 @@ struct AlertScopeSelector: Codable, Hashable {
 
 struct ServiceAlert: Identifiable, Codable, Hashable {
     let id: String
+    let source: AlertSource
     let title: String
     let message: String?
     let severity: AlertSeverity
@@ -57,6 +72,7 @@ struct ServiceAlert: Identifiable, Codable, Hashable {
 
     init(
         id: String,
+        source: AlertSource = .gtfsRealtime,
         title: String,
         message: String?,
         severity: AlertSeverity,
@@ -67,6 +83,7 @@ struct ServiceAlert: Identifiable, Codable, Hashable {
         scopes: [AlertScopeSelector]
     ) {
         self.id = id
+        self.source = source
         self.title = title
         self.message = message
         self.severity = severity
@@ -81,7 +98,14 @@ struct ServiceAlert: Identifiable, Codable, Hashable {
         scopes.isEmpty || scopes.contains(where: \.isGlobal)
     }
 
+    var isBroadNetworkNotice: Bool {
+        source == .stmServiceStatus && isGlobal
+    }
+
     var scopeSummary: String {
+        if isBroadNetworkNotice {
+            return "STM network"
+        }
         if isGlobal {
             return "System"
         }

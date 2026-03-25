@@ -16,6 +16,7 @@ actor STMRealtimeRepository: RealtimeRepository {
     private let vehicleFeedURL = URL(string: "https://api.stm.info/pub/od/gtfs-rt/ic/v2/vehiclePositions")!
     private let tripUpdatesFeedURL = URL(string: "https://api.stm.info/pub/od/gtfs-rt/ic/v2/tripUpdates")!
     private let alertsFeedURL = URL(string: "https://api.stm.info/pub/od/gtfs-rt/ic/v2/serviceAlerts")!
+    private let serviceStatusURL = URL(string: "https://api.stm.info/pub/od/i3/v2/messages/etatservice")!
     private let apiKey: String
     private let session: URLSession
 
@@ -32,6 +33,7 @@ actor STMRealtimeRepository: RealtimeRepository {
         async let vehiclesTask = fetchVehiclesFeed(apiKey: apiKey)
         async let tripUpdatesTask = fetchTripUpdatesFeed(apiKey: apiKey)
         async let alertsTask = fetchAlertsFeed(apiKey: apiKey)
+        async let serviceStatusTask = fetchSTMServiceStatus(apiKey: apiKey)
 
         let vehicles = try await vehiclesTask
         let tripUpdateResult = try? await tripUpdatesTask
@@ -39,7 +41,8 @@ actor STMRealtimeRepository: RealtimeRepository {
         let embeddedAlerts = tripUpdateResult?.alerts ?? []
         let tripUpdateShapes = tripUpdateResult?.shapePointsByShapeID ?? [:]
         let serviceAlerts = (try? await alertsTask) ?? []
-        let alerts = dedupeAlerts(embeddedAlerts + serviceAlerts)
+        let networkStatusAlerts = (try? await serviceStatusTask) ?? []
+        let alerts = dedupeAlerts(embeddedAlerts + serviceAlerts + networkStatusAlerts)
 
         return RealtimeSnapshot(
             vehicles: vehicles,
@@ -149,6 +152,16 @@ actor STMRealtimeRepository: RealtimeRepository {
     private func fetchAlertsFeed(apiKey: String) async throws -> [ServiceAlert] {
         let feed = try await fetchFeed(url: alertsFeedURL, apiKey: apiKey)
         return GTFSRealtimeAlertParser.parseAlerts(from: feed)
+    }
+
+    private func fetchSTMServiceStatus(apiKey: String) async throws -> [ServiceAlert] {
+        var request = URLRequest(url: serviceStatusURL)
+        request.timeoutInterval = 7
+        request.addValue(apiKey, forHTTPHeaderField: "apiKey")
+        request.addValue("application/json", forHTTPHeaderField: "Accept")
+
+        let (data, _) = try await session.data(for: request)
+        return STMServiceStatusParser.parseAlerts(from: data)
     }
 
     private func fetchFeed(url: URL, apiKey: String) async throws -> TransitRealtime_FeedMessage {
@@ -271,6 +284,7 @@ struct GTFSRealtimeAlertParser {
 
             let serviceAlert = ServiceAlert(
                 id: normalized(entity.id) ?? derivedID(title: title, scopes: scopes, activePeriods: activePeriods),
+                source: .gtfsRealtime,
                 title: title,
                 message: message,
                 severity: severity(alert.severityLevel, effect: alert.effect),

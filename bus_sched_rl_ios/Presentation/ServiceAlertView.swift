@@ -20,6 +20,15 @@ struct ServiceAlertView: View {
                             .padding(.vertical, 4)
                             .background(iconTint.opacity(0.12), in: Capsule())
 
+                        if alert.source == .stmServiceStatus {
+                            Text(alert.source.title)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.primary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(NearbyETATheme.secondaryText.opacity(0.12), in: Capsule())
+                        }
+
                         Text(alert.scopeSummary)
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(NearbyETATheme.secondaryText)
