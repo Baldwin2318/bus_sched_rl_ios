@@ -38,9 +38,12 @@ The app combines:
 
 1. Clone the repository.
 2. Open `bus_sched_rl_ios.xcodeproj` in Xcode.
-3. Configure `STMApiKey` in `bus-sched-rl-ios-Info.plist`.
-4. Select the `bus_sched_rl_ios` scheme.
-5. Build and run on simulator or device.
+3. Copy `Config/Secrets.example.xcconfig` to `Config/Secrets.local.xcconfig`.
+4. Put your STM key in `STM_API_KEY` inside `Config/Secrets.local.xcconfig`.
+5. Select the `bus_sched_rl_ios` scheme.
+6. Build and run on simulator or device.
+
+`Config/Secrets.local.xcconfig` is ignored by Git and should not be committed.
 
 ## Build and Test
 

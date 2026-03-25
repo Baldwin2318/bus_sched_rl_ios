@@ -31,3 +31,6 @@ playground.xcworkspace
 
 # Local agent instructions
 AGENT.md
+
+# Local app secrets
+Config/Secrets.local.xcconfig

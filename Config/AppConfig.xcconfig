@@ -1,0 +1,2 @@
+STM_API_KEY =
+#include? "Secrets.local.xcconfig"

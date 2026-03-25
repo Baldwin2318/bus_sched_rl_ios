@@ -5,6 +5,6 @@
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Your location is used to suggest nearby bus routes.</string>
 	<key>STMApiKey</key>
-	<string>l763b4d1e0a5dd421c8c93ad7983e24a72</string>
+	<string>$(STM_API_KEY)</string>
 </dict>
 </plist>
