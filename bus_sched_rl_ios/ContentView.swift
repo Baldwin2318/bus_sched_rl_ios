@@ -9,10 +9,11 @@ struct ContentView: View {
 
     @StateObject private var viewModel = NearbyETAViewModel()
     @StateObject private var locationService = LocationService()
+    @State private var navigationPath: [NearbyETACard] = []
     @FocusState private var isSearchFocused: Bool
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $navigationPath) {
             ZStack {
                 NearbyETATheme.background.ignoresSafeArea()
 
@@ -114,6 +115,13 @@ struct ContentView: View {
                     viewModel.refreshManually()
                 }
                 .scrollDismissesKeyboard(.interactively)
+                .navigationDestination(for: NearbyETACard.self) { card in
+                    ArrivalDetailView(
+                        viewModel: viewModel,
+                        locationService: locationService,
+                        initialCard: card
+                    )
+                }
             }
             .navigationBarTitleDisplayMode(.inline)
 //            .toolbar {
@@ -335,12 +343,8 @@ struct ContentView: View {
     }
 
     private func cardLink(_ card: NearbyETACard) -> some View {
-        NavigationLink {
-            ArrivalDetailView(
-                viewModel: viewModel,
-                locationService: locationService,
-                initialCard: card
-            )
+        Button {
+            navigationPath.append(card)
         } label: {
             ETACardView(card: card, showsDisclosureIndicator: true)
         }
