@@ -57,6 +57,15 @@ final class ArrivalDetailModelTests: XCTestCase {
         let model = ArrivalDetailModel(
             card: card,
             vehicle: vehicle,
+            vehicleRender: RenderedVehiclePosition(
+                vehicle: vehicle,
+                coordinate: vehicle.coord,
+                heading: vehicle.heading,
+                freshness: .fresh,
+                ageSeconds: 5,
+                isInterpolating: false,
+                isSnappedToRoute: false
+            ),
             tripUpdate: tripUpdate,
             assignedStopName: "Temporary Stop"
         )
@@ -66,5 +75,6 @@ final class ArrivalDetailModelTests: XCTestCase {
         XCTAssertEqual(model.assignedStopText, "Temporary Stop")
         XCTAssertEqual(model.occupancyText, "84% occupied")
         XCTAssertEqual(model.congestionText, "Stop-and-go traffic")
+        XCTAssertEqual(model.freshnessText, "Fresh")
     }
 }

@@ -15,13 +15,22 @@ final class ArrivalLiveMapModelTests: XCTestCase {
             coord: CLLocationCoordinate2D(latitude: 45.5000, longitude: -73.6000),
             lastUpdatedAt: Date()
         )
+        let renderedVehicle = RenderedVehiclePosition(
+            vehicle: vehicle,
+            coordinate: vehicle.coord,
+            heading: vehicle.heading,
+            freshness: .fresh,
+            ageSeconds: 4,
+            isInterpolating: false,
+            isSnappedToRoute: false
+        )
 
         let model = ArrivalLiveMapModel(
-            vehicle: vehicle,
+            vehicle: renderedVehicle,
             stopName: "Main Stop",
             stopCoordinate: stopLocation,
             userLocation: userLocation,
-            pathCoordinates: [vehicle.coord, stopLocation]
+            pathCoordinates: [renderedVehicle.coordinate, stopLocation]
         )
 
         XCTAssertEqual(model.stopName, "Main Stop")
@@ -42,14 +51,23 @@ final class ArrivalLiveMapModelTests: XCTestCase {
             coord: CLLocationCoordinate2D(latitude: 45.5000, longitude: -73.6000),
             lastUpdatedAt: Date()
         )
+        let renderedVehicle = RenderedVehiclePosition(
+            vehicle: vehicle,
+            coordinate: vehicle.coord,
+            heading: vehicle.heading,
+            freshness: .fresh,
+            ageSeconds: 4,
+            isInterpolating: false,
+            isSnappedToRoute: false
+        )
 
         let model = ArrivalLiveMapModel(
-            vehicle: vehicle,
+            vehicle: renderedVehicle,
             stopName: "Main Stop",
             stopCoordinate: stopLocation,
             userLocation: nil,
             pathCoordinates: [
-                vehicle.coord,
+                renderedVehicle.coordinate,
                 CLLocationCoordinate2D(latitude: 45.5008, longitude: -73.6007),
                 CLLocationCoordinate2D(latitude: 45.5014, longitude: -73.6014),
                 stopLocation

@@ -18,6 +18,12 @@ final class NearbyETAViewModel: ObservableObject {
         static let refreshIntervalMonths = 6
     }
 
+    private enum VehicleRenderConfig {
+        static let freshnessThresholds = VehicleRenderState.FreshnessThresholds.default
+        static let maximumSnapDistanceMeters: CLLocationDistance = 35
+        static let routeSnapEnabled = true
+    }
+
     @Published var query: String = "" {
         didSet {
             guard query != oldValue else { return }
@@ -63,6 +69,7 @@ final class NearbyETAViewModel: ObservableObject {
     private var detailRefreshObservers = 0
     private var favoriteIDs: [FavoriteArrivalID]
     private var favoriteFallbackCardsByID: [String: NearbyETACard] = [:]
+    private var vehicleRenderStatesByID: [String: VehicleRenderState] = [:]
 
     init(
         gtfsRepository: GTFSRepository = LiveGTFSRepository(),
@@ -289,26 +296,21 @@ final class NearbyETAViewModel: ObservableObject {
     }
 
     func liveVehicle(for card: NearbyETACard) -> VehiclePosition? {
-        guard card.source == .live else { return nil }
+        liveVehicleRenderState(for: card)?.current
+    }
 
-        if let liveVehicleID = card.liveVehicleID,
-           let vehicle = snapshot.vehicles.first(where: { $0.id == liveVehicleID }) {
-            return vehicle
-        }
-
-        if let tripID = card.tripID,
-           let vehicle = snapshot.vehicles.first(where: { $0.tripID == tripID }) {
-            return vehicle
-        }
-
-        let routeMatches = snapshot.vehicles.filter {
-            $0.route == card.routeID && String($0.direction ?? 0) == card.directionID
-        }
-        if routeMatches.count == 1 {
-            return routeMatches[0]
-        }
-
-        return nil
+    func liveVehicleRender(
+        for card: NearbyETACard,
+        referenceDate: Date = Date()
+    ) -> RenderedVehiclePosition? {
+        guard let renderState = liveVehicleRenderState(for: card) else { return nil }
+        return renderState.sample(
+            at: referenceDate,
+            routeShapePoints: routeShapePoints(for: card),
+            snapToRoute: VehicleRenderConfig.routeSnapEnabled,
+            maximumSnapDistanceMeters: VehicleRenderConfig.maximumSnapDistanceMeters,
+            freshnessThresholds: VehicleRenderConfig.freshnessThresholds
+        )
     }
 
     func tripUpdate(for card: NearbyETACard) -> TripUpdatePayload? {
@@ -349,21 +351,22 @@ final class NearbyETAViewModel: ObservableObject {
 
     func arrivalLiveMapModel(
         for card: NearbyETACard,
-        userLocation: CLLocationCoordinate2D?
+        userLocation: CLLocationCoordinate2D?,
+        referenceDate: Date = Date()
     ) -> ArrivalLiveMapModel? {
-        guard let vehicle = liveVehicle(for: card),
+        guard let renderedVehicle = liveVehicleRender(for: card, referenceDate: referenceDate),
               let stop = dataIndex?.allStopsByID[card.stopID] else {
             return nil
         }
 
         let pathCoordinates = routePathCoordinates(
             for: card,
-            vehicleCoordinate: vehicle.coord,
+            vehicleCoordinate: renderedVehicle.coordinate,
             stopCoordinate: stop.coord
         )
 
         return ArrivalLiveMapModel(
-            vehicle: vehicle,
+            vehicle: renderedVehicle,
             stopName: stop.name,
             stopCoordinate: stop.coord,
             userLocation: userLocation,
@@ -428,6 +431,15 @@ final class NearbyETAViewModel: ObservableObject {
             return Array(shapePoints[vehicleIndex...stopIndex])
         }
         return Array(shapePoints[stopIndex...vehicleIndex].reversed())
+    }
+
+    private func routeShapePoints(for card: NearbyETACard) -> [CLLocationCoordinate2D]? {
+        guard let staticData else { return nil }
+        let routeKey = RouteKey(route: card.routeID, direction: card.directionID)
+        let shapeID = card.tripID.flatMap { staticData.shapeIDByTripID[$0] } ??
+            staticData.routeShapeIDByRouteKey[routeKey]
+        guard let shapeID else { return nil }
+        return staticData.shapePointsByShapeID[shapeID]
     }
 
     private func nearestShapePointIndex(
@@ -664,9 +676,15 @@ final class NearbyETAViewModel: ObservableObject {
         Task {
             do {
                 let snapshot = try await realtimeRepository.fetchSnapshot()
+                let receivedAt = Date()
                 await MainActor.run {
+                    self.vehicleRenderStatesByID = self.updatedVehicleRenderStates(
+                        existing: self.vehicleRenderStatesByID,
+                        vehicles: snapshot.vehicles,
+                        receivedAt: receivedAt
+                    )
                     self.snapshot = snapshot
-                    self.lastUpdatedAt = Date()
+                    self.lastUpdatedAt = receivedAt
                     self.liveStatusMessage = nil
                     self.refreshCards()
                 }
@@ -684,5 +702,56 @@ final class NearbyETAViewModel: ObservableObject {
                 self.isRefreshing = false
             }
         }
+    }
+
+    private func liveVehicleRenderState(for card: NearbyETACard) -> VehicleRenderState? {
+        guard card.source == .live else { return nil }
+
+        if let liveVehicleID = card.liveVehicleID,
+           let renderState = vehicleRenderStatesByID[liveVehicleID] {
+            return renderState
+        }
+
+        if let tripID = card.tripID {
+            let tripMatches = vehicleRenderStatesByID.values.filter { $0.current.tripID == tripID }
+            if tripMatches.count == 1 {
+                return tripMatches[0]
+            }
+        }
+
+        let routeMatches = vehicleRenderStatesByID.values.filter {
+            $0.current.route == card.routeID && String($0.current.direction ?? 0) == card.directionID
+        }
+        if routeMatches.count == 1 {
+            return routeMatches[0]
+        }
+
+        return nil
+    }
+
+    private func updatedVehicleRenderStates(
+        existing: [String: VehicleRenderState],
+        vehicles: [VehiclePosition],
+        receivedAt: Date
+    ) -> [String: VehicleRenderState] {
+        let durationComponents = livePollInterval.components
+        let expectedPollInterval = max(
+            1.0,
+            TimeInterval(durationComponents.seconds) +
+                (Double(durationComponents.attoseconds) / 1_000_000_000_000_000_000)
+        )
+        var updatedStates: [String: VehicleRenderState] = [:]
+        updatedStates.reserveCapacity(vehicles.count)
+
+        for vehicle in vehicles {
+            updatedStates[vehicle.id] = VehicleRenderState.updated(
+                existing: existing[vehicle.id],
+                with: vehicle,
+                receivedAt: receivedAt,
+                expectedPollInterval: expectedPollInterval
+            )
+        }
+
+        return updatedStates
     }
 }

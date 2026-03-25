@@ -15,10 +15,12 @@ struct ArrivalDetailModel: Equatable {
     let assignedStopText: String?
     let occupancyText: String?
     let congestionText: String?
+    let freshnessText: String?
 
     init(
         card: NearbyETACard,
         vehicle: VehiclePosition?,
+        vehicleRender: RenderedVehiclePosition?,
         tripUpdate: TripUpdatePayload?,
         assignedStopName: String?
     ) {
@@ -36,7 +38,14 @@ struct ArrivalDetailModel: Equatable {
         switch card.source {
         case .live:
             sourceTitle = "Live ETA"
-            sourceDescription = "This arrival time is coming from live trip updates."
+            switch vehicleRender?.freshness {
+            case .aging:
+                sourceDescription = "This arrival time is live, but the latest vehicle update is aging."
+            case .stale:
+                sourceDescription = "This arrival time is live, but the vehicle position may be stale."
+            case .none, .some(.fresh):
+                sourceDescription = "This arrival time is coming from live trip updates."
+            }
         case .estimated:
             sourceTitle = "Estimated ETA"
             sourceDescription = "This arrival time is estimated from the latest vehicle position."
@@ -75,6 +84,7 @@ struct ArrivalDetailModel: Equatable {
             occupancyText = vehicle?.occupancyStatus?.title
         }
         congestionText = vehicle?.congestionLevel?.title
+        freshnessText = vehicleRender?.freshness.title
     }
 }
 
@@ -92,13 +102,18 @@ struct ArrivalDetailView: View {
         ArrivalDetailModel(
             card: currentCard,
             vehicle: liveVehicle,
+            vehicleRender: liveVehicleRender,
             tripUpdate: tripUpdate,
             assignedStopName: assignedStop?.name
         )
     }
 
+    private var liveVehicleRender: RenderedVehiclePosition? {
+        viewModel.liveVehicleRender(for: currentCard)
+    }
+
     private var liveVehicle: VehiclePosition? {
-        viewModel.liveVehicle(for: currentCard)
+        liveVehicleRender?.vehicle ?? viewModel.liveVehicle(for: currentCard)
     }
 
     private var tripUpdate: TripUpdatePayload? {
@@ -107,13 +122,6 @@ struct ArrivalDetailView: View {
 
     private var assignedStop: BusStop? {
         viewModel.assignedStop(for: currentCard)
-    }
-
-    private var liveMapModel: ArrivalLiveMapModel? {
-        viewModel.arrivalLiveMapModel(
-            for: currentCard,
-            userLocation: locationService.location
-        )
     }
 
     private var alerts: [ServiceAlert] {
@@ -135,25 +143,31 @@ struct ArrivalDetailView: View {
                     }
                 }
 
-                if let liveMapModel {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Live map")
-                            .font(.title3.weight(.semibold))
-                        Text("Shows your live location, this stop, and the live bus path. Only the bus refreshes every 10 seconds.")
-                            .font(.subheadline)
-                            .foregroundStyle(NearbyETATheme.secondaryText)
-                        ArrivalLiveMapView(model: liveMapModel)
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    if let liveMapModel = viewModel.arrivalLiveMapModel(
+                        for: currentCard,
+                        userLocation: locationService.location,
+                        referenceDate: context.date
+                    ) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Live map")
+                                .font(.title3.weight(.semibold))
+                            Text("Shows your live location, this stop, and the live bus path. Only the bus refreshes every 10 seconds.")
+                                .font(.subheadline)
+                                .foregroundStyle(NearbyETATheme.secondaryText)
+                            ArrivalLiveMapView(model: liveMapModel)
+                        }
+                        .padding(18)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                .fill(NearbyETATheme.panel)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                .stroke(NearbyETATheme.panelBorder, lineWidth: 1)
+                        )
                     }
-                    .padding(18)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        RoundedRectangle(cornerRadius: 22, style: .continuous)
-                            .fill(NearbyETATheme.panel)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 22, style: .continuous)
-                            .stroke(NearbyETATheme.panelBorder, lineWidth: 1)
-                    )
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
@@ -195,6 +209,9 @@ struct ArrivalDetailView: View {
                     }
                     if let congestionText = model.congestionText {
                         detailRow(title: "Traffic", value: congestionText)
+                    }
+                    if let freshnessText = model.freshnessText {
+                        detailRow(title: "Position freshness", value: freshnessText)
                     }
                     detailRow(title: "Arrival time", value: model.arrivalTimeText)
                     if let distanceText = model.distanceText {

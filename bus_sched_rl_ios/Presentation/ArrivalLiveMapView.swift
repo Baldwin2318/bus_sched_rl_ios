@@ -58,7 +58,7 @@ private struct ArrivalLiveMKMapView: UIViewRepresentable {
             stopAnnotation.coordinate = model.stopCoordinate
 
             busAnnotation.title = "Bus"
-            busAnnotation.coordinate = model.vehicle.coord
+            busAnnotation.coordinate = model.vehicle.coordinate
             usesRouteShapePath = model.usesRouteShapePath
 
             if !mapView.annotations.contains(where: { $0 === stopAnnotation }) {
@@ -68,12 +68,20 @@ private struct ArrivalLiveMKMapView: UIViewRepresentable {
                 mapView.addAnnotation(busAnnotation)
             }
 
+            if let busView = mapView.view(for: busAnnotation) {
+                configureBusView(
+                    busView,
+                    heading: model.vehicle.heading,
+                    freshness: model.vehicle.freshness
+                )
+            }
+
             syncRouteOverlay(model: model, mapView: mapView)
             syncVisibleRect(model: model, mapView: mapView)
         }
 
         private func syncRouteOverlay(model: ArrivalLiveMapModel, mapView: MKMapView) {
-            let overlayHash = "\(model.vehicle.coord.latitude):\(model.vehicle.coord.longitude):\(model.stopCoordinate.latitude):\(model.stopCoordinate.longitude):\(model.routeLine.pointCount)"
+            let overlayHash = "\(model.vehicle.coordinate.latitude):\(model.vehicle.coordinate.longitude):\(model.stopCoordinate.latitude):\(model.stopCoordinate.longitude):\(model.routeLine.pointCount)"
             guard overlayHash != lastOverlayHash else { return }
 
             mapView.removeOverlays(mapView.overlays)
@@ -83,8 +91,8 @@ private struct ArrivalLiveMKMapView: UIViewRepresentable {
 
         private func syncVisibleRect(model: ArrivalLiveMapModel, mapView: MKMapView) {
             let visibleRectHash = [
-                model.vehicle.coord.latitude,
-                model.vehicle.coord.longitude,
+                model.vehicle.coordinate.latitude,
+                model.vehicle.coordinate.longitude,
                 model.stopCoordinate.latitude,
                 model.stopCoordinate.longitude,
                 model.userLocation?.latitude ?? 0,
@@ -97,7 +105,7 @@ private struct ArrivalLiveMKMapView: UIViewRepresentable {
             guard visibleRectHash != lastVisibleRectHash else { return }
 
             var rect = model.routeLine.boundingMapRect
-            rect = rect.union(MKMapRect(origin: MKMapPoint(model.vehicle.coord), size: MKMapSize(width: 0, height: 0)))
+            rect = rect.union(MKMapRect(origin: MKMapPoint(model.vehicle.coordinate), size: MKMapSize(width: 0, height: 0)))
             rect = rect.union(MKMapRect(origin: MKMapPoint(model.stopCoordinate), size: MKMapSize(width: 0, height: 0)))
             if let userLocation = model.userLocation {
                 rect = rect.union(MKMapRect(origin: MKMapPoint(userLocation), size: MKMapSize(width: 0, height: 0)))
@@ -136,13 +144,10 @@ private struct ArrivalLiveMKMapView: UIViewRepresentable {
 
             if annotation === busAnnotation {
                 let identifier = "bus"
-                let view = mapView.dequeueReusableAnnotationView(withIdentifier: identifier) as? MKMarkerAnnotationView ??
-                    MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: identifier)
+                let view = mapView.dequeueReusableAnnotationView(withIdentifier: identifier) ??
+                    MKAnnotationView(annotation: annotation, reuseIdentifier: identifier)
                 view.annotation = annotation
-                view.markerTintColor = UIColor(NearbyETATheme.accentFallback)
-                view.glyphImage = UIImage(systemName: "bus.fill")
-                view.glyphTintColor = .white
-                view.displayPriority = .required
+                configureBusView(view, heading: 0, freshness: .fresh)
                 view.canShowCallout = true
                 return view
             }
@@ -159,5 +164,46 @@ private struct ArrivalLiveMKMapView: UIViewRepresentable {
 
             return nil
         }
+
+        private func configureBusView(
+            _ view: MKAnnotationView,
+            heading: Double,
+            freshness: VehicleFreshness
+        ) {
+            view.image = busImage
+            view.centerOffset = CGPoint(x: 0, y: -16)
+            view.transform = CGAffineTransform(rotationAngle: CGFloat(heading * .pi / 180))
+            switch freshness {
+            case .fresh:
+                view.alpha = 1
+            case .aging:
+                view.alpha = 0.82
+            case .stale:
+                view.alpha = 0.58
+            }
+        }
+
+        private var busImage: UIImage {
+            Self.busImage
+        }
+
+        private static let busImage: UIImage = {
+            let size = CGSize(width: 34, height: 34)
+            return UIGraphicsImageRenderer(size: size).image { _ in
+                let rect = CGRect(origin: .zero, size: size)
+                UIColor(NearbyETATheme.accentFallback).setFill()
+                UIBezierPath(roundedRect: rect, cornerRadius: 12).fill()
+
+                let symbolConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .bold)
+                let symbol = UIImage(systemName: "bus.fill", withConfiguration: symbolConfig)?
+                    .withTintColor(.white, renderingMode: .alwaysOriginal)
+                let symbolSize = symbol?.size ?? .zero
+                let symbolOrigin = CGPoint(
+                    x: (size.width - symbolSize.width) * 0.5,
+                    y: (size.height - symbolSize.height) * 0.5
+                )
+                symbol?.draw(at: symbolOrigin)
+            }
+        }()
     }
 }

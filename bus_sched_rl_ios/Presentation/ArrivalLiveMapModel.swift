@@ -3,7 +3,7 @@ import MapKit
 import CoreLocation
 
 struct ArrivalLiveMapModel {
-    let vehicle: VehiclePosition
+    let vehicle: RenderedVehiclePosition
     let stopName: String
     let stopCoordinate: CLLocationCoordinate2D
     let userLocation: CLLocationCoordinate2D?
@@ -12,7 +12,7 @@ struct ArrivalLiveMapModel {
     let usesRouteShapePath: Bool
 
     init(
-        vehicle: VehiclePosition,
+        vehicle: RenderedVehiclePosition,
         stopName: String,
         stopCoordinate: CLLocationCoordinate2D,
         userLocation: CLLocationCoordinate2D?,
@@ -25,7 +25,7 @@ struct ArrivalLiveMapModel {
 
         let normalizedPath = Self.normalizedPath(
             providedPath: pathCoordinates,
-            vehicleCoordinate: vehicle.coord,
+            vehicleCoordinate: vehicle.coordinate,
             stopCoordinate: stopCoordinate
         )
         self.usesRouteShapePath = normalizedPath.count > 2
