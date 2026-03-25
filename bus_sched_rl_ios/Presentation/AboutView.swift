@@ -12,7 +12,7 @@ struct AboutView: View {
                     aboutSection(
                         title: "What",
                         icon: "🚌",
-                        body: "Bus ETA is a simple app that helps you quickly check bus arrival times, see where a live bus is on the map, and keep track of your favorite trips without digging through a bigger transit app."
+                        body: "Bus ETA is a small personal hobby project that helps you quickly check bus arrival times, see where a live bus is on the map, and keep track of your favorite trips in a simpler, friendlier way."
                     )
 
                     aboutSection(
@@ -75,7 +75,12 @@ struct AboutView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Credit")
                 .font(.headline)
-            Text("Transit data © STM (Société de transport de Montréal)")
+
+            Text("Data provided by Société de transport de Montréal (STM) via open data services.")
+                .font(.subheadline)
+                .foregroundStyle(NearbyETATheme.secondaryText)
+
+            Text("This app is not affiliated with or endorsed by STM.")
                 .font(.subheadline)
                 .foregroundStyle(NearbyETATheme.secondaryText)
         }
