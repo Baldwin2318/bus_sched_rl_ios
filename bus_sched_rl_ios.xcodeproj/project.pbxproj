@@ -12,9 +12,10 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		8A1E70002F00000100ABCD01 /* AppConfig.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/AppConfig.xcconfig; sourceTree = SOURCE_ROOT; };
-		8A1E70012F00000100ABCD01 /* Secrets.example.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/Secrets.example.xcconfig; sourceTree = SOURCE_ROOT; };
+		55537D032F73841000A874D6 /* Secrets.local.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Secrets.local.xcconfig; sourceTree = "<group>"; };
 		55EB0F172E03AA9A004F9400 /* bus_sched_rl_ios.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = bus_sched_rl_ios.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		8A1E70002F00000100ABCD01 /* Config/AppConfig.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/AppConfig.xcconfig; sourceTree = SOURCE_ROOT; };
+		8A1E70012F00000100ABCD01 /* Config/Secrets.example.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/Secrets.example.xcconfig; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -58,8 +59,9 @@
 		8A1E70022F00000100ABCD01 /* Config */ = {
 			isa = PBXGroup;
 			children = (
-				8A1E70002F00000100ABCD01 /* AppConfig.xcconfig */,
-				8A1E70012F00000100ABCD01 /* Secrets.example.xcconfig */,
+				55537D032F73841000A874D6 /* Secrets.local.xcconfig */,
+				8A1E70002F00000100ABCD01 /* Config/AppConfig.xcconfig */,
+				8A1E70012F00000100ABCD01 /* Config/Secrets.example.xcconfig */,
 			);
 			path = Config;
 			sourceTree = "<group>";
@@ -271,7 +273,7 @@
 		};
 		55EB0F2B2E03AA9B004F9400 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 8A1E70002F00000100ABCD01 /* AppConfig.xcconfig */;
+			baseConfigurationReference = 8A1E70002F00000100ABCD01 /* Config/AppConfig.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -303,7 +305,7 @@
 		};
 		55EB0F2C2E03AA9B004F9400 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 8A1E70002F00000100ABCD01 /* AppConfig.xcconfig */;
+			baseConfigurationReference = 8A1E70002F00000100ABCD01 /* Config/AppConfig.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
