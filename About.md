@@ -1,12 +1,10 @@
-# About
-
-## What
+# What
 
 This is a personal iOS project I made for checking STM bus arrivals in Montreal 🚌
 
 It helps me see nearby buses, search routes or stops, and check live bus information in a simpler way
 
-## Why
+# Why
 
 Around the quarter of 2025, I started using STM transportation again
 
@@ -22,7 +20,7 @@ I want this app to be simple, fast, and direct. Open it, check the bus and move 
 
 Later on, I decided to push the code to GitHub 🤓
 
-## How
+# How
 
 The app uses STM open transit data
 
