@@ -79,7 +79,7 @@ private struct SchedTabView: View {
     var body: some View {
         NavigationStack(path: $navigationPath) {
             ZStack {
-                NearbyETATheme.background.ignoresSafeArea()
+                NearbyETABackground()
 
                 List {
                     Section {
@@ -407,7 +407,7 @@ private struct SearchTabView: View {
     var body: some View {
         NavigationStack(path: $navigationPath) {
             ZStack {
-                NearbyETATheme.background.ignoresSafeArea()
+                NearbyETABackground()
 
                 List {
                     Section {
