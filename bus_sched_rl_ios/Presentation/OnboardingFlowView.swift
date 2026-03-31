@@ -10,9 +10,9 @@ struct OnboardingFlowView: View {
         ZStack {
             LinearGradient(
                 colors: [
-                    Color(red: 0.95, green: 0.97, blue: 1.0),
-                    Color(red: 0.98, green: 0.99, blue: 1.0),
-                    Color.white
+                    Color(.systemBackground),
+                    Color(.secondarySystemBackground),
+                    Color(.systemBackground)
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
@@ -118,11 +118,11 @@ struct OnboardingFlowView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 32, style: .continuous)
-                .fill(Color.white.opacity(0.88))
+                .fill(Color(.secondarySystemBackground).opacity(0.88))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 32, style: .continuous)
-                .stroke(Color.white.opacity(0.65), lineWidth: 1)
+                .stroke(Color(.separator).opacity(0.4), lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.06), radius: 20, y: 10)
     }
