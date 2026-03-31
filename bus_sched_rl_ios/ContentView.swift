@@ -2,16 +2,68 @@ import SwiftUI
 import UIKit
 
 struct ContentView: View {
-    private let loadingSkeletonCount = 4
-
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.openURL) private var openURL
 
     @StateObject private var viewModel = NearbyETAViewModel()
     @StateObject private var locationService = LocationService()
-    @State private var navigationPath: [NearbyETACard] = []
     @State private var isShowingAboutSheet = false
-    @FocusState private var isSearchFocused: Bool
+
+    var body: some View {
+        TabView {
+            SchedTabView(
+                viewModel: viewModel,
+                locationService: locationService,
+                isShowingAboutSheet: $isShowingAboutSheet,
+                openURL: openURL
+            )
+            .tabItem {
+                Label("Sched", systemImage: "clock")
+            }
+
+            SearchTabView(
+                viewModel: viewModel,
+                locationService: locationService,
+                isShowingAboutSheet: $isShowingAboutSheet
+            )
+            .tabItem {
+                Label("Search", systemImage: "magnifyingglass")
+            }
+        }
+        .sheet(isPresented: $isShowingAboutSheet) {
+            AboutView()
+                .accessibilityIdentifier("about-sheet")
+        }
+        .task {
+            viewModel.loadIfNeeded()
+            viewModel.setScenePhase(scenePhase)
+            viewModel.updateLocationAuthorization(locationService.authorizationState)
+            locationService.requestAccessAndStart()
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            viewModel.setScenePhase(newPhase)
+        }
+        .onChange(of: locationService.authorizationState) { _, newState in
+            viewModel.updateLocationAuthorization(newState)
+            if newState.isAuthorized {
+                locationService.requestAccessAndStart()
+            }
+        }
+        .onReceive(locationService.$location) { location in
+            viewModel.updateUserLocation(location)
+        }
+    }
+}
+
+private struct SchedTabView: View {
+    private let loadingSkeletonCount = 4
+
+    @ObservedObject var viewModel: NearbyETAViewModel
+    @ObservedObject var locationService: LocationService
+    @Binding var isShowingAboutSheet: Bool
+    let openURL: OpenURLAction
+
+    @State private var navigationPath: [NearbyETACard] = []
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
@@ -21,9 +73,6 @@ struct ContentView: View {
                 List {
                     Section {
                         header
-                            .listRowStyling()
-
-                        searchBar
                             .listRowStyling()
 
                         if shouldShowLocationBanner {
@@ -40,12 +89,6 @@ struct ContentView: View {
                         if let liveStatusMessage = viewModel.liveStatusMessage {
                             statusBanner(text: liveStatusMessage, tint: .orange)
                                 .listRowStyling()
-                        }
-
-                        if !viewModel.searchResults.isEmpty {
-                            searchResultsPanel
-                                .listRowStyling()
-                                .accessibilityIdentifier("search-results-section")
                         }
                     }
 
@@ -65,7 +108,8 @@ struct ContentView: View {
 
                     Section {
                         switch viewModel.phase {
-                        case .idle, .loading where viewModel.nearbyCards.isEmpty:
+                        case .idle where viewModel.nearbyCards.isEmpty,
+                             .loading where viewModel.nearbyCards.isEmpty:
                             ForEach(0..<loadingSkeletonCount, id: \.self) { index in
                                 SkeletonETACardView()
                                     .listRowStyling()
@@ -101,7 +145,6 @@ struct ContentView: View {
                 .refreshable {
                     viewModel.refreshManually()
                 }
-                .scrollDismissesKeyboard(.interactively)
                 .navigationDestination(for: NearbyETACard.self) { card in
                     ArrivalDetailView(
                         viewModel: viewModel,
@@ -128,28 +171,6 @@ struct ContentView: View {
                 }
             }
         }
-        .sheet(isPresented: $isShowingAboutSheet) {
-            AboutView()
-                .accessibilityIdentifier("about-sheet")
-        }
-        .task {
-            viewModel.loadIfNeeded()
-            viewModel.setScenePhase(scenePhase)
-            viewModel.updateLocationAuthorization(locationService.authorizationState)
-            locationService.requestAccessAndStart()
-        }
-        .onChange(of: scenePhase) { _, newPhase in
-            viewModel.setScenePhase(newPhase)
-        }
-        .onChange(of: locationService.authorizationState) { _, newState in
-            viewModel.updateLocationAuthorization(newState)
-            if newState.isAuthorized {
-                locationService.requestAccessAndStart()
-            }
-        }
-        .onReceive(locationService.$location) { location in
-            viewModel.updateUserLocation(location)
-        }
     }
 
     private var header: some View {
@@ -162,40 +183,6 @@ struct ContentView: View {
                 .font(.subheadline)
                 .foregroundStyle(NearbyETATheme.secondaryText)
         }
-    }
-
-    private var searchBar: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(NearbyETATheme.secondaryText)
-
-            TextField("Search route or stop", text: $viewModel.query)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .focused($isSearchFocused)
-
-            if !viewModel.query.isEmpty {
-                Button {
-                    viewModel.clearSearch()
-                    isSearchFocused = false
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(NearbyETATheme.secondaryText)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Clear search")
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 13)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(NearbyETATheme.panel)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(NearbyETATheme.panelBorder, lineWidth: 1)
-        )
     }
 
     private var shouldShowLocationBanner: Bool {
@@ -307,31 +294,6 @@ struct ContentView: View {
         )
     }
 
-    private var searchResultsPanel: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Search Matches")
-                .font(.headline)
-            ForEach(viewModel.searchResults) { result in
-                Button {
-                    viewModel.selectSearchResult(result)
-                    isSearchFocused = false
-                } label: {
-                    SearchResultRow(result: result)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(NearbyETATheme.panel)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(NearbyETATheme.panelBorder, lineWidth: 1)
-        )
-    }
-
     private func cardLink(_ card: NearbyETACard) -> some View {
         Button {
             navigationPath.append(card)
@@ -406,7 +368,7 @@ struct ContentView: View {
 
     private var emptyStateTitle: String {
         switch locationService.authorizationState {
-        case .notDetermined, .denied, .restricted where viewModel.query.isEmpty:
+        case .notDetermined, .denied, .restricted:
             return "Waiting for location"
         default:
             return "No arrivals found"
@@ -415,11 +377,237 @@ struct ContentView: View {
 
     private var emptyStateBody: String {
         switch locationService.authorizationState {
-        case .notDetermined, .denied, .restricted where viewModel.query.isEmpty:
-            return "Allow location access or search for a stop or route to load arrivals."
+        case .notDetermined, .denied, .restricted:
+            return "Allow location access to load routes and stops closest to you."
         default:
-            return "Try a different route or stop, or refresh to pull the latest realtime data."
+            return "Refresh to pull the latest realtime data."
         }
+    }
+}
+
+private struct SearchTabView: View {
+    @ObservedObject var viewModel: NearbyETAViewModel
+    @ObservedObject var locationService: LocationService
+    @Binding var isShowingAboutSheet: Bool
+
+    @State private var navigationPath: [NearbyETACard] = []
+    @FocusState private var isSearchFocused: Bool
+
+    var body: some View {
+        NavigationStack(path: $navigationPath) {
+            ZStack {
+                NearbyETATheme.background.ignoresSafeArea()
+
+                List {
+                    Section {
+                        searchHero
+                            .listRowStyling()
+                    }
+
+                    if !viewModel.searchResults.isEmpty {
+                        Section {
+                            ForEach(viewModel.searchResults) { result in
+                                Button {
+                                    viewModel.selectSearchResult(result)
+                                    isSearchFocused = false
+                                } label: {
+                                    SearchResultRow(result: result)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        } header: {
+                            searchSectionHeader
+                        }
+                    } else {
+                        Section {
+                            searchEmptyState
+                                .listRowStyling()
+                        }
+                    }
+
+                    if viewModel.selectedResult != nil || !viewModel.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Section {
+                            if viewModel.nearbyCards.isEmpty {
+                                searchResultsEmptyCardsPanel
+                                    .listRowStyling()
+                            } else {
+                                ForEach(viewModel.nearbyCards) { card in
+                                    cardLink(card)
+                                        .listRowStyling()
+                                }
+                            }
+                        } header: {
+                            sectionHeader(
+                                title: viewModel.titleText,
+                                count: viewModel.nearbyCards.isEmpty ? nil : viewModel.nearbyCards.count,
+                                subtitle: viewModel.lastUpdatedAt.map {
+                                    "Updated \($0.formatted(date: .omitted, time: .shortened))"
+                                }
+                            )
+                        }
+                    }
+                }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .contentMargins(.horizontal, 16, for: .scrollContent)
+                .scrollDismissesKeyboard(.interactively)
+                .navigationDestination(for: NearbyETACard.self) { card in
+                    ArrivalDetailView(
+                        viewModel: viewModel,
+                        locationService: locationService,
+                        initialCard: card
+                    )
+                }
+            }
+            .navigationTitle("Search")
+            .navigationBarTitleDisplayMode(.inline)
+            .searchable(
+                text: $viewModel.query,
+                placement: .navigationBarDrawer(displayMode: .always),
+                prompt: "Search route or stop"
+            )
+            .searchFocused($isSearchFocused)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button {
+                            isShowingAboutSheet = true
+                        } label: {
+                            Label("About", systemImage: "info.circle")
+                        }
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                    .accessibilityLabel("Settings")
+                }
+            }
+        }
+    }
+
+    private var searchHero: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Find your bus faster")
+                .font(.system(.title2, design: .rounded).weight(.bold))
+            Text("Search routes and stops, then jump straight into the arrivals you need.")
+                .font(.subheadline)
+                .foregroundStyle(NearbyETATheme.secondaryText)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(NearbyETATheme.panel)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(NearbyETATheme.panelBorder, lineWidth: 1)
+        )
+    }
+
+    private var searchSectionHeader: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text("Search Matches")
+                .font(.title3.weight(.semibold))
+                .textCase(nil)
+            Spacer(minLength: 12)
+            Text("\(viewModel.searchResults.count)")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(NearbyETATheme.secondaryText)
+                .textCase(nil)
+        }
+        .padding(.top, 8)
+    }
+
+    private var searchEmptyState: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Search routes or stops")
+                .font(.headline)
+            Text("Use the search field above to browse STM routes and stops without digging through the nearby list.")
+                .font(.subheadline)
+                .foregroundStyle(NearbyETATheme.secondaryText)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(NearbyETATheme.panel)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(NearbyETATheme.panelBorder, lineWidth: 1)
+        )
+    }
+
+    private var searchResultsEmptyCardsPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("No arrivals found")
+                .font(.headline)
+            Text("Try a different route or stop, or refresh to pull the latest realtime data.")
+                .font(.subheadline)
+                .foregroundStyle(NearbyETATheme.secondaryText)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(NearbyETATheme.panel)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(NearbyETATheme.panelBorder, lineWidth: 1)
+        )
+    }
+
+    private func cardLink(_ card: NearbyETACard) -> some View {
+        Button {
+            navigationPath.append(card)
+        } label: {
+            ETACardView(
+                card: card,
+                quality: viewModel.cardQuality(for: card),
+                showsDisclosureIndicator: true
+            )
+        }
+        .buttonStyle(.plain)
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button {
+                viewModel.toggleFavorite(card)
+            } label: {
+                Label(
+                    viewModel.isFavorite(card) ? "Remove Favorite" : "Save Favorite",
+                    systemImage: viewModel.isFavorite(card) ? "star.slash" : "star.fill"
+                )
+            }
+            .tint(.yellow)
+        }
+    }
+
+    private func sectionHeader(
+        title: String,
+        count: Int? = nil,
+        subtitle: String? = nil
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.title3.weight(.semibold))
+                    .textCase(nil)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(NearbyETATheme.secondaryText)
+                        .textCase(nil)
+                }
+            }
+            Spacer(minLength: 12)
+            if let count {
+                Text("\(count)")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(NearbyETATheme.secondaryText)
+                    .textCase(nil)
+            }
+        }
+        .padding(.top, 8)
     }
 }
 
