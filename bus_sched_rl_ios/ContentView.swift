@@ -5,6 +5,7 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.openURL) private var openURL
 
+    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
     @StateObject private var viewModel = NearbyETAViewModel()
     @StateObject private var locationService = LocationService()
     @State private var isShowingAboutSheet = false
@@ -34,18 +35,28 @@ struct ContentView: View {
             AboutView()
                 .accessibilityIdentifier("about-sheet")
         }
+        .fullScreenCover(isPresented: .constant(!hasCompletedOnboarding)) {
+            OnboardingFlowView(locationService: locationService) { shouldRequestLocation in
+                hasCompletedOnboarding = true
+                if shouldRequestLocation {
+                    locationService.requestAccessAndStart()
+                }
+            }
+        }
         .task {
             viewModel.loadIfNeeded()
             viewModel.setScenePhase(scenePhase)
             viewModel.updateLocationAuthorization(locationService.authorizationState)
-            locationService.requestAccessAndStart()
+            if hasCompletedOnboarding {
+                locationService.requestAccessAndStart()
+            }
         }
         .onChange(of: scenePhase) { _, newPhase in
             viewModel.setScenePhase(newPhase)
         }
         .onChange(of: locationService.authorizationState) { _, newState in
             viewModel.updateLocationAuthorization(newState)
-            if newState.isAuthorized {
+            if hasCompletedOnboarding, newState.isAuthorized {
                 locationService.requestAccessAndStart()
             }
         }
